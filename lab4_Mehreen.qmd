@@ -1,0 +1,1763 @@
+---
+title: "Lab 4 DATA 622: Machin Learning and Big Data"
+author: "Mehreen Gillani"
+html:
+    toc: true                 # enables table of contents
+    toc-depth: 3              # how many heading levels to show
+    toc-location: left        # left, right, or body
+    toc-title: "Contents"     # custom title
+    toc-expand: true          # expanded by default
+    fig-width: 10
+    fig-height: 6
+    fig-dpi: 150
+execute:
+  warning: false
+  message: false
+---
+
+```{python}
+import pandas as pd
+import numpy as np
+import matplotlib.pyplot as plt
+import seaborn as sns
+import warnings
+```
+
+```{python}
+
+file_path = "https://raw.githubusercontent.com/georgehagstrom/DATA622Spring2026/refs/heads/main/website/assignments/labs/labData/nba_stint_data.csv"
+
+nba_stints= pd.read_csv(file_path)
+nba_stints.head()
+```
+
+### Problem 1: Ridge Regression for Inference 
+
+\*\*Ordinary Linear Regression:\*\* Use ordinary linear regression to fit the model described in the overview. Use cross-validation to estimate the out of sample root mean squared error and compare it to the in sample error, you may use ‘RidgeCV’ with to keep consistency with the rest of the assignment, or use ‘LinearRegression’. Make sure ‘fit_intercept=True’, the intercept corresponds to the home court advantage, and do not use ‘sample_weight’. Does the difference between in-sample and cross-validated mean squared error suggest a major problem with overfitting?
+
+```{python}
+# ── Define player columns (col index 7 onwards) ──────────
+player_cols = nba_stints.columns[7:]
+
+print(f"Dataset shape:    {nba_stints.shape}")
+print(f"Number of stints: {len(nba_stints):,}")
+print(f"Number of players:{len(player_cols):,}")
+print(f"\nFirst few columns: {list(nba_stints.columns[:8])}")
+print(f"\nTarget (margin) stats:")
+print(nba_stints['margin'].describe().round(2))
+
+# Visualize the problem
+import matplotlib.pyplot as plt
+
+# Count how many stints each player appears in
+player_appearances = (nba_stints[player_cols] != 0).sum(axis=0)
+
+plt.figure(figsize=(10, 4))
+plt.hist(player_appearances, bins=50, edgecolor='black')
+plt.xlabel('Number of Stints')
+plt.ylabel('Number of Players')
+plt.title('Player Appearance Distribution\n(Many players appear in very few stints)')
+plt.axvline(player_appearances.median(), color='red', 
+            linestyle='--', label=f'Median: {player_appearances.median():.0f} stints')
+plt.legend()
+plt.show()
+
+print(f"Players appearing in <50 stints:  {(player_appearances < 50).sum()}")
+print(f"Players appearing in <100 stints: {(player_appearances < 100).sum()}")
+print(f"Players appearing in >500 stints: {(player_appearances > 500).sum()}")
+```
+
+69 players appeared in fewer than 50 stints out of \~30,000 That's less than 0.17% of all stints
+
+294 players appeared in 500+ stints These are starters and key rotation players
+
+```{python}
+total_players = len(player_cols)
+sparse        = (player_appearances < 50).sum()
+limited       = (player_appearances < 100).sum()
+reliable      = (player_appearances > 500).sum()
+
+print("PLAYER APPEARANCE SUMMARY")
+print("=" * 45)
+print(f"Total players:          {total_players:>6,}")
+print(f"Sparse  (<50 stints):   {sparse:>6,}  ({sparse/total_players*100:.1f}%)  ← OLS overfits")
+print(f"Limited (<100 stints):  {limited:>6,}  ({limited/total_players*100:.1f}%)  ← unreliable")
+print(f"Reliable (>500 stints): {reliable:>6,}  ({reliable/total_players*100:.1f}%)  ← trustworthy")
+
+print(f"""
+KEY INSIGHT:
+  {sparse} players ({sparse/total_players*100:.1f}%) have fewer than 50 observations
+  OLS will overfit these players → extreme unreliable RAPM values
+  Ridge regression will SHRINK these toward zero → conservative estimates
+  
+  {reliable} players ({reliable/total_players*100:.1f}%) have 500+ stints
+  These are starters/key rotation players → most reliable RAPM estimates
+""")
+```
+
+```{python}
+from sklearn.linear_model import RidgeCV, LinearRegression
+from sklearn.model_selection import cross_val_score
+from sklearn.metrics import mean_squared_error
+
+# Suppress runtime warnings globally for this chunk
+warnings.filterwarnings('ignore', category=RuntimeWarning)
+# ── 1. Prepare features and target ──────────────────────────────────────────
+# Player columns start at column index 7 onwards
+player_cols = nba_stints.columns[7:]
+
+X = nba_stints[player_cols].values        # player +1/0/-1 indicators
+y = nba_stints['margin'].values           # target: point margin per possession
+n_pos = nba_stints['n_pos'].values        # possessions (NOT used as weight per instructions)
+
+print(f"Feature matrix shape: {X.shape}")
+print(f"Target shape:         {y.shape}")
+print(f"Players in model:     {X.shape[1]}")
+
+# ── 2. Fit Ordinary Linear Regression ───────────────────────────────────────
+# Using RidgeCV with near-zero alpha to approximate OLS (keeps consistency)
+# fit_intercept=True → intercept = home court advantage
+
+ols = RidgeCV(
+    alphas  = [1e-10],        # near-zero regularization ≈ OLS
+    fit_intercept = True,     # intercept = home court advantage
+    cv      = 5
+)
+ols.fit(X, y)
+
+# ── 3. In-Sample Error ───────────────────────────────────────────────────────
+y_pred_insample = ols.predict(X)
+rmse_insample   = np.sqrt(mean_squared_error(y, y_pred_insample))
+mse_insample    = mean_squared_error(y, y_pred_insample)
+
+print(f"\n{'='*50}")
+print(f"IN-SAMPLE PERFORMANCE")
+print(f"{'='*50}")
+print(f"  MSE:  {mse_insample:.4f}")
+print(f"  RMSE: {rmse_insample:.4f}")
+print(f"  Intercept (Home Court Advantage): {ols.intercept_:.4f} pts/possession")
+
+# ── 4. Cross-Validated Error ─────────────────────────────────────────────────
+# Negative MSE scores → convert to positive
+cv_mse_scores = -cross_val_score(
+    RidgeCV(alphas=[1e-10], fit_intercept=True),
+    X, y,
+    cv      = 5,
+    scoring = 'neg_mean_squared_error'
+)
+
+cv_mse_mean  = cv_mse_scores.mean()
+cv_rmse_mean = np.sqrt(cv_mse_mean)
+cv_rmse_std  = np.sqrt(cv_mse_scores).std()
+
+print(f"\n{'='*50}")
+print(f"CROSS-VALIDATED PERFORMANCE (5-Fold)")
+print(f"{'='*50}")
+print(f"  CV MSE  (mean): {cv_mse_mean:.4f}")
+print(f"  CV RMSE (mean): {cv_rmse_mean:.4f} ± {cv_rmse_std:.4f}")
+print(f"  Per-fold RMSE:  {[round(np.sqrt(s), 4) for s in cv_mse_scores]}")
+
+# ── 5. Overfitting Assessment ────────────────────────────────────────────────
+rmse_diff = cv_rmse_mean - rmse_insample
+pct_diff  = (rmse_diff / rmse_insample) * 100
+
+print(f"\n{'='*50}")
+print(f"OVERFITTING ASSESSMENT")
+print(f"{'='*50}")
+print(f"  In-Sample RMSE:    {rmse_insample:.4f}")
+print(f"  CV RMSE:           {cv_rmse_mean:.4f}")
+print(f"  Difference:        {rmse_diff:.4f} ({pct_diff:.1f}%)")
+
+if pct_diff > 20:
+    verdict = "YES - Major overfitting detected"
+elif pct_diff > 5:
+    verdict = "MODERATE - Some overfitting present"
+else:
+    verdict = "NO - Minimal overfitting"
+
+print(f"  Verdict:           {verdict}")
+
+# ── 6. Home Court Advantage Interpretation ───────────────────────────────────
+# Convert from per-possession to per-game (avg ~100 possessions/game)
+hca_per_game = ols.intercept_ 
+print(f"\n{'='*50}")
+print(f"HOME COURT ADVANTAGE")
+print(f"{'='*50}")
+print(f"  Per 100 possessions: {ols.intercept_:.4f} pts")
+print(f"  Per game (~200 pos total, 100/team): {ols.intercept_:.2f} pts")
+print(f"  Context: Known NBA home court = ~3 pts/game")
+print(f"  Our estimate: ~{ols.intercept_:.1f} pts reasonable")
+```
+
+The difference between in-sample RMSE (69.63) and cross-validated RMSE (74.17) is relatively modest at 6.5%, suggesting moderate but not catastrophic overfitting. While the gap indicates the model does not generalize perfectly to unseen data, it is not a major cause for concern given the dataset has 32,358 stints against 539 player features — a ratio of approximately 60 observations per feature, which is well above the conventional threshold for OLS stability.
+
+However, the high RMSE values overall (\~74) reflect that basketball margin is inherently noisy and difficult to predict from lineup data alone.
+
+The consistent CV RMSE across all five folds (ranging narrowly from 73.53 to 74.86) further confirms that the overfitting is systematic rather than driven by any particular data split.
+
+**b. Examining ‘RAPM’ Coefficients:** Create a dataframe with the player-ids, the RAPM coefficients, and join it with the player names (from the data file shared earlier). Use the stint matrix to calculate the number of minutes that each player played (‘minutes’ variable) and add that to the data frame too. Sort the players in descending order by ‘RAPM’ and print the top 20 players by ‘RAPM’. What do you notice about their minutes played? Look up the names of a few of the top players on the internet- are they regarded as top NBA players? Make a scatter plot of ‘RAPM’ versus minutes-played.
+
+```{python}
+
+player_ids_url = "https://raw.githubusercontent.com/georgehagstrom/DATA622Spring2026/refs/heads/main/website/assignments/labs/labData/player_id.csv"
+
+player_names = pd.read_csv(player_ids_url)   # load player names 
+print("Player names file:")
+print(player_names.head())
+print(f"Columns: {player_names.columns.tolist()}")
+```
+
+```{python}
+
+# ── 2. Build RAPM DataFrame ──────────────────────────────────────────────────
+rapm_df = pd.DataFrame({
+    'player_id': player_cols,
+    'RAPM':      ols.coef_
+})
+
+# Clean player_id to match format in player_names file
+rapm_df['player_id'] = rapm_df['player_id'].astype(str)
+player_names['player_id'] = player_names['player_id'].astype(str)
+
+# Join with player names
+rapm_df = rapm_df.merge(player_names, on='player_id', how='left')
+print(f"\nAfter merge: {len(rapm_df):,} players")
+print(rapm_df.head())
+```
+
+```{python}
+# ── 3. Calculate Minutes Played per Player ───────────────────────────────────
+# For each player, sum minutes from stints where they were on court (±1)
+minutes_played = {}
+
+for player in player_cols:
+    # Player was on court when value is +1 or -1
+    on_court_mask = nba_stints[player] != 0
+    minutes_played[player] = nba_stints.loc[on_court_mask, 'minutes'].sum()
+
+# Add to dataframe
+rapm_df['minutes_played'] = rapm_df['player_id'].map(minutes_played)
+
+print("\nMinutes played stats:")
+print(rapm_df['minutes_played'].describe().round(1))
+```
+
+```{python}
+# ── 4. Sort and Print Top 20 ─────────────────────────────────────────────────
+rapm_sorted = rapm_df.sort_values('RAPM', ascending=False).reset_index(drop=True)
+
+print("\nTOP 20 PLAYERS BY OLS RAPM")
+print("=" * 65)
+print(f"{'Rank':<5} {'Player':<25} {'RAPM':>8} {'Minutes':>10}")
+print("-" * 65)
+
+for i, row in rapm_sorted.head(20).iterrows():
+    print(f"{i+1:<5} {str(row.get('player_name', row['player_id'])):<25} "
+          f"{row['RAPM']:>8.2f} {row['minutes_played']:>10.0f}")
+
+print("\nMinutes Played - Top 20 Stats:")
+top20 = rapm_sorted.head(20)
+print(f"  Mean minutes:   {top20['minutes_played'].mean():,.0f}")
+print(f"  Median minutes: {top20['minutes_played'].median():,.0f}")
+print(f"  Min minutes:    {top20['minutes_played'].min():,.0f}")
+print(f"  Max minutes:    {top20['minutes_played'].max():,.0f}")
+print(f"\n  Low minutes players (<100 min): "
+      f"{(top20['minutes_played'] < 100).sum()} out of 20")
+```
+
+```{python}
+# ── 5. Scatter Plot RAPM vs Minutes ─────────────────────────────────────────
+fig, ax = plt.subplots(figsize=(10, 6))
+
+# All players
+ax.scatter(rapm_df['minutes_played'], rapm_df['RAPM'],
+           alpha=0.4, color='steelblue', s=20, label='All Players')
+
+# Highlight top 20
+ax.scatter(top20['minutes_played'], top20['RAPM'],
+           color='red', s=60, zorder=5, label='Top 20 RAPM')
+
+# Label top 10 by name
+for _, row in rapm_sorted.head(10).iterrows():
+    name = str(row.get('player_name', row['player_id']))
+    ax.annotate(name,
+                xy=(row['minutes_played'], row['RAPM']),
+                xytext=(5, 5), textcoords='offset points',
+                fontsize=7, color='darkred')
+
+# Reference lines
+ax.axhline(y=0,   color='black', linestyle='-',  linewidth=0.8, alpha=0.5)
+ax.axvline(x=500, color='gray',  linestyle='--', linewidth=0.8, 
+           alpha=0.7, label='500 min threshold')
+
+ax.set_xlabel('Minutes Played', fontsize=12)
+ax.set_ylabel('RAPM (pts per 100 possessions)', fontsize=12)
+ax.set_title('OLS RAPM vs Minutes Played\n(Top players in red)', fontsize=13)
+ax.legend(fontsize=10)
+ax.grid(True, alpha=0.3)
+
+plt.tight_layout()
+plt.show()
+```
+
+**Out of Top 20:**
+
+-   15 players played fewer than 100 minutes
+
+-   Only 3 players played 500+ minutes (Jokic, Brunson, McBride)
+
+```{python}
+# Quantify the minutes problem clearly
+print("TOP 20 MINUTES BREAKDOWN")
+print("=" * 45)
+thresholds = [50, 100, 500, 1000]
+for t in thresholds:
+    count = (top20['minutes_played'] < t).sum()
+    print(f"  Played < {t:>4} minutes: {count:>2}/20 players ({count/20*100:.0f}%)")
+
+print(f"\nMedian minutes (Top 20):    {top20['minutes_played'].median():>6.0f}")
+print(f"Median minutes (All players):{rapm_df['minutes_played'].median():>6.0f}")
+
+
+```
+
+##### OLS RAPM Findings
+
+Best player = High RAPM + High Minutes
+
+From Our table only TWO players qualify:
+
+Nikola Jokic RAPM 37.63 2,256 min
+
+Jalen Brunson RAPM 36.86 2,406 min
+
+Everyone else either:
+
+→ Has too few minutes to trust (ranks 1-7, 9, 11+)
+
+→ Or has moderate minutes but unproven sample
+
+**Minutes Played Problem:**
+
+\- Median minutes for top 20 players is only 43 minutes vs 965 minutes for the average player — a 22x gap
+
+\- 60% of top 20 players played fewer than 50 minutes and 90% played fewer than 1,000 minutes
+
+**What This Means:**
+
+-   OLS overfits players with very few appearances - a player on court for just 2 minutes during a high-scoring run receives an artificially extreme RAPM coefficient
+-   The top ranked player (Stanley Umude, RAPM 77.40) played only 2 minutes while the median player played 965 minutes
+
+**Conclusion:**
+
+OLS assigns extreme coefficients to low-minute players with no penalty for small sample size — these are statistical artifacts not true skill
+
+**c. Ridge Regression RAPM:** The results of (b) suggest that the model is attaching extreme values of ‘RAPM’ to low minute players, something which can be potentially fixed with regularization. Define a vector of regularization parameters ‘alpha’ on a logarithmic scale between and (look up ‘np.logspace’). Make this vector contain at least 10 but not more than 200 values of ‘alpha’ (pick based on how fast your computer is). Use ‘RidgeCV’ to fit a ridge regression model, selecting the model with the best value of the hyperparameters. What value of ‘alpha’ is optimal? Next repeat the same calculation as you did in part (b) (you could create a function or just copy the dataframe and replace the old ‘RAPM’ with new ‘RAPM’). Look up some of the top players that your model identified, are they well regarded by the NBA? Make a scatterplot of ‘RAPM’ versus minutes played.
+
+```{python}
+import warnings
+import numpy as np
+from sklearn.linear_model import RidgeCV
+
+# ── 1. Define Alpha Vector on Logarithmic Scale ──────────────────────────────
+# logspace between 10^-2 and 10^4, 100 values
+alphas = np.logspace(-2, 4, 100)
+
+print(f"Alpha range:      {alphas[0]:.4f} to {alphas[-1]:,.0f}")
+print(f"Number of alphas: {len(alphas)}")
+print(f"Sample values:    {[round(a, 3) for a in alphas[:5]]} ... {[round(a,1) for a in alphas[-5:]]}")
+
+# ── 2. Fit Ridge Regression with Cross Validation ────────────────────────────
+with warnings.catch_warnings():
+    warnings.filterwarnings('ignore', category=RuntimeWarning)
+    ridge = RidgeCV(
+        alphas        = alphas,
+        fit_intercept = True,
+        cv            = 5
+    )
+    ridge.fit(X, y)
+
+print(f"\nRIDGE CV RESULTS")
+print(f"{'='*50}")
+print(f"  Optimal alpha:          {ridge.alpha_:.4f}")
+print(f"  Log10(optimal alpha):   {np.log10(ridge.alpha_):.2f}")
+print(f"  Intercept (HCA):        {ridge.intercept_:.4f} pts/100 possessions")
+```
+
+```{python}
+# ── 3. Build Ridge RAPM DataFrame ────────────────────────────────────────────
+ridge_rapm_df = pd.DataFrame({
+    'player_id': player_cols,
+    'RAPM':      ridge.coef_
+})
+
+# Merge with player names
+ridge_rapm_df['player_id'] = ridge_rapm_df['player_id'].astype(str)
+ridge_rapm_df = ridge_rapm_df.merge(player_names, on='player_id', how='left')
+
+# Add minutes played
+ridge_rapm_df['minutes_played'] = ridge_rapm_df['player_id'].map(minutes_played)
+
+# Sort by RAPM descending
+ridge_rapm_sorted = ridge_rapm_df.sort_values('RAPM', ascending=False).reset_index(drop=True)
+
+# ──4.  Print Top 20 ──────────────────────────────────────────────────────────
+print("\nTOP 20 PLAYERS BY RIDGE RAPM")
+print("=" * 65)
+print(f"{'Rank':<5} {'Player':<25} {'RAPM':>8} {'Minutes':>10}")
+print("-" * 65)
+
+for i, row in ridge_rapm_sorted.head(20).iterrows():
+    print(f"{i+1:<5} {str(row['player_name']):<25} "
+          f"{row['RAPM']:>8.2f} {row['minutes_played']:>10.0f}")
+
+# Minutes breakdown
+top20_ridge = ridge_rapm_sorted.head(20)
+print(f"\nMINUTES BREAKDOWN - TOP 20 RIDGE")
+print("=" * 45)
+for t in [50, 100, 500, 1000]:
+    count = (top20_ridge['minutes_played'] < t).sum()
+    print(f"  Played < {t:>4} minutes: {count:>2}/20 ({count/20*100:.0f}%)")
+
+print(f"\n  Median minutes (Top 20):     {top20_ridge['minutes_played'].median():>6.0f}")
+print(f"  Median minutes (All players):{ridge_rapm_df['minutes_played'].median():>6.0f}")
+
+```
+
+```{python}
+# ── OLS vs Ridge Top 20 Side by Side ─────────────────────────────────────────
+ols_top20   = rapm_sorted.head(20).reset_index(drop=True)
+ridge_top20 = ridge_rapm_sorted.head(20).reset_index(drop=True)
+
+print("\nOLS TOP 20  vs  RIDGE TOP 20")
+print("=" * 85)
+print(f"{'--- OLS ---':<40}  {'--- RIDGE ---':<40}")
+print(f"{'Rank':<5} {'Player':<22} {'RAPM':>6} {'Min':>6}  "
+      f"{'Rank':<5} {'Player':<22} {'RAPM':>6} {'Min':>6}")
+print("-" * 85)
+
+for i in range(20):
+    ols_row   = ols_top20.iloc[i]
+    ridge_row = ridge_top20.iloc[i]
+    
+    ols_name   = str(ols_row['player_name'])[:22]
+    ridge_name = str(ridge_row['player_name'])[:22]
+    
+    print(f"{i+1:<5} {ols_name:<22} {ols_row['RAPM']:>6.2f} {ols_row['minutes_played']:>6.0f}  "
+          f"{i+1:<5} {ridge_name:<22} {ridge_row['RAPM']:>6.2f} {ridge_row['minutes_played']:>6.0f}")
+
+print("=" * 85)
+print(f"\n{'SUMMARY':^85}")
+print(f"  Median minutes OLS:   {ols_top20['minutes_played'].median():>6.0f} min")
+print(f"  Median minutes Ridge: {ridge_top20['minutes_played'].median():>6.0f} min")
+print(f"  OLS  RAPM range:      {ols_top20['RAPM'].min():.2f} to {ols_top20['RAPM'].max():.2f}")
+print(f"  Ridge RAPM range:     {ridge_top20['RAPM'].min():.2f} to {ridge_top20['RAPM'].max():.2f}")
+```
+
+```{python}
+# ── 6. Scatter Plot Ridge RAPM vs Minutes ────────────────────────────────────
+fig, axes = plt.subplots(1, 2, figsize=(14, 6))
+
+# ── OLS Plot (left) ──
+axes[0].scatter(rapm_df['minutes_played'], rapm_df['RAPM'],
+                alpha=0.3, color='steelblue', s=15, label='All Players')
+axes[0].scatter(rapm_sorted.head(20)['minutes_played'],
+                rapm_sorted.head(20)['RAPM'],
+                color='red', s=50, zorder=5, label='Top 20')
+axes[0].axhline(y=0, color='black', linewidth=0.8, alpha=0.5)
+axes[0].axvline(x=500, color='gray', linestyle='--', linewidth=0.8, alpha=0.7)
+axes[0].set_xlabel('Minutes Played', fontsize=11)
+axes[0].set_ylabel('RAPM (pts per 100 possessions)', fontsize=11)
+axes[0].set_title('OLS RAPM vs Minutes\n(Extreme values at low minutes)', fontsize=11)
+axes[0].legend(fontsize=9)
+axes[0].grid(True, alpha=0.3)
+
+# ── Ridge Plot (right) ──
+axes[1].scatter(ridge_rapm_df['minutes_played'], ridge_rapm_df['RAPM'],
+                alpha=0.3, color='steelblue', s=15, label='All Players')
+axes[1].scatter(top20_ridge['minutes_played'], top20_ridge['RAPM'],
+                color='red', s=50, zorder=5, label='Top 20')
+
+# Label top 10 ridge players
+for _, row in ridge_rapm_sorted.head(10).iterrows():
+    axes[1].annotate(str(row['player_name']).split()[-1],
+                     xy=(row['minutes_played'], row['RAPM']),
+                     xytext=(5, 3), textcoords='offset points',
+                     fontsize=7, color='darkred')
+
+axes[1].axhline(y=0, color='black', linewidth=0.8, alpha=0.5)
+axes[1].axvline(x=500, color='gray', linestyle='--', linewidth=0.8, alpha=0.7)
+axes[1].set_xlabel('Minutes Played', fontsize=11)
+axes[1].set_ylabel('RAPM (pts per 100 possessions)', fontsize=11)
+axes[1].set_title(f'Ridge RAPM vs Minutes\n(alpha={ridge.alpha_:.2f})', fontsize=11)
+axes[1].legend(fontsize=9)
+axes[1].grid(True, alpha=0.3)
+
+plt.suptitle('OLS vs Ridge RAPM: Effect of Regularization', 
+             fontsize=13, fontweight='bold', y=1.02)
+plt.tight_layout()
+plt.show()
+```
+
+**Optimal Alpha:** Ridge cross-validation selected an optimal alpha of 613.59 (log10 = 2.79), indicating that strong regularization was necessary — consistent with the severe overfitting observed in OLS.
+
+**Top 20 Quality:**
+
+-   Median minutes for top 20 players jumped from 43 (OLS) to 2,088 (Ridge) — a 49x improvement
+-   Only 1 player in the top 20 played fewer than 1,000 minutes compared to 18 under OLS
+-   RAPM range compressed from ±77 (OLS) to ±6 (Ridge) — far more realistic values
+-   All top 20 Ridge players have substantial playing time confirming Ridge correctly prioritizes well-represented players over sparse ones
+
+**OLS vs Ridge Rankings:**
+
+Players with high minutes and high OLS RAPM (Jokic rank 8, Brunson rank 10) are correctly promoted further up in Ridge rankings Players with low minutes and inflated OLS RAPM are completely removed from top 20 Ridge rankings align minutes played with RAPM — players with more data receive more reliable and stable coefficients
+
+**Conclusion:** Ridge regression successfully addresses the overfitting problem by shrinking unreliable low-minute coefficients toward zero, producing rankings that reflect genuine sustained performance rather than statistical artifacts from limited playing time.
+
+### Problem 2: Possession Weights
+
+**a. Heteroscedasticity in Stints:** Make a plot of the ‘margin’ variable as a function of the number of possessions in a stint. What do you notice about the variance of ‘margin’? Why do you think it is happening?
+
+```{python}
+import matplotlib.pyplot as plt
+import numpy as np
+
+# ── 1. Basic Stats by Possession Buckets ─────────────────────────────────────
+print("MARGIN VARIANCE BY POSSESSION COUNT")
+print("=" * 55)
+
+# Bucket possessions for summary stats
+possession_buckets = pd.cut(nba_stints['n_pos'], 
+                             bins=[0, 5, 10, 20, 30, 50, 100, float('inf')],
+                             labels=['1-5', '6-10', '11-20', '21-30', '31-50', '51-100', '100+'])
+
+bucket_stats = nba_stints.groupby(possession_buckets, observed=True)['margin'].agg(
+    Count  = 'count',
+    Mean   = 'mean',
+    Std    = 'std',
+    Min    = 'min',
+    Max    = 'max'
+).round(2)
+
+print(bucket_stats)
+```
+
+```{python}
+# ── 2. Main Scatter Plot ──────────────────────────────────────────────────────
+fig, axes = plt.subplots(1, 2, figsize=(14, 6))
+
+# ── Left: Raw Scatter ──
+axes[0].scatter(nba_stints['n_pos'], nba_stints['margin'],
+                alpha=0.1, s=5, color='steelblue')
+axes[0].axhline(y=0, color='red', linewidth=1, linestyle='--', alpha=0.7)
+axes[0].set_xlabel('Number of Possessions (n_pos)', fontsize=11)
+axes[0].set_ylabel('Margin (pts per 100 possessions)', fontsize=11)
+axes[0].set_title('Margin vs Possessions\n(Raw Scatter)', fontsize=12)
+axes[0].grid(True, alpha=0.3)
+
+# ── Right: Variance by Possession ──
+# Calculate rolling std to show variance shrinking
+pos_groups = nba_stints.groupby('n_pos')['margin'].std().reset_index()
+pos_groups.columns = ['n_pos', 'margin_std']
+pos_counts = nba_stints.groupby('n_pos')['margin'].count().reset_index()
+pos_counts.columns = ['n_pos', 'count']
+pos_groups = pos_groups.merge(pos_counts, on='n_pos')
+
+# Only plot possession counts with enough data
+pos_groups_filtered = pos_groups[pos_groups['count'] >= 10]
+
+axes[1].scatter(pos_groups_filtered['n_pos'], 
+                pos_groups_filtered['margin_std'],
+                alpha=0.6, s=20, color='steelblue')
+
+# Add theoretical 1/sqrt(n) curve
+n_range  = np.linspace(1, pos_groups_filtered['n_pos'].max(), 200)
+# Scale to match data
+scale    = pos_groups_filtered['margin_std'].iloc[0] * np.sqrt(
+           pos_groups_filtered['n_pos'].iloc[0])
+theo_std = scale / np.sqrt(n_range)
+axes[1].plot(n_range, theo_std, color='red', linewidth=2, 
+             linestyle='--', label='Theoretical 1/√n_pos')
+
+axes[1].set_xlabel('Number of Possessions (n_pos)', fontsize=11)
+axes[1].set_ylabel('Std Dev of Margin', fontsize=11)
+axes[1].set_title('Margin Variance vs Possessions\n(Variance shrinks with more possessions)', 
+                  fontsize=12)
+axes[1].legend(fontsize=10)
+axes[1].grid(True, alpha=0.3)
+
+plt.suptitle('Heteroscedasticity in Stint Margins', 
+             fontsize=13, fontweight='bold')
+plt.tight_layout()
+plt.show()
+```
+
+```{python}
+# ── 3. Quantify the Variance Pattern ─────────────────────────────────────────
+print("\nVARIANCE PATTERN SUMMARY")
+print("=" * 50)
+
+low_pos  = nba_stints[nba_stints['n_pos'] <= 5]['margin'].std()
+mid_pos  = nba_stints[(nba_stints['n_pos'] > 5)  & 
+                       (nba_stints['n_pos'] <= 20)]['margin'].std()
+high_pos = nba_stints[nba_stints['n_pos'] > 20]['margin'].std()
+
+print(f"  Std Dev (1-5 possessions):   {low_pos:>8.2f}")
+print(f"  Std Dev (6-20 possessions):  {mid_pos:>8.2f}")
+print(f"  Std Dev (20+ possessions):   {high_pos:>8.2f}")
+print(f"  Variance reduction ratio:    {low_pos/high_pos:>8.2f}x")
+
+```
+
+**Understanding** Std drops from 91.55 → 15.78 as possessions increase That is a 5.8x reduction in variance!
+
+**SHORT stints (1-5 pos):** - 16,190 stints = most common ← lots of noise - Std = 91.55 ← huge variance - Max = +400 ← one shot = extreme margin
+
+**LONG stints (51-100 pos):** - Only 7 stints = very rare ← law of large numbers - Std = 15.78 ← tight variance - Max = +25 ← stable reliable estimate
+
+-   2 possessions: one lucky shot dominates margin
+-   100 possessions: true team quality emerges
+
+**OLS treats ALL stints equally regardless of length:**L
+
+-   Stint A: 2 possessions, margin = +200 ← noise
+-   Stint B: 50 possessions, margin = +8 ← signal
+
+**OLS says: both observations count the same!** -
+
+Gets fooled by noisy short stints - Assigns extreme RAPM to players in short stints
+
+**This is HETEROSCEDASTICITY:**
+
+Variance is NOT constant — it depends on n_pos
+
+Fix → Weight each stint by n_pos:
+
+\- Short stints (2 pos) → low weight (unreliable)
+
+\- Long stints (50 pos) → high weight (reliable)
+
+**b. Implementing Weights Regression:** The solution to the issue that you observed in 2(a) is something called weighted least squares. This involves adjusting the error term for each stint based on a weight that accounts for whatever factor controls the variance. The new weighted model looks like this:
+
+where is a coefficient that determines how the variance of ‘margin’ should scale for each stint. The idea is that should be smaller for stints where the variance is high, and larger for stints where the variance is low. This forces the model to fit the low-variance stints more closely than the high-variance stints. The correct weights for this problem are the , which implies that the variance of the margin is inversely proportional to the number of stints. Verify this by making a scatter plot of the margin rate times the square root of the number of possessions versus the number of possessions. Then recalculate the player ‘RAPM’ coefficients from 1(c) by setting the ‘weights’ keyword in the model fit to be ‘n_pos’. How have the rankings of top players changed?
+
+```{python}
+# ── 1. Verify Weights: Plot margin × sqrt(n_pos) vs n_pos ────────────────────
+nba_stints['margin_weighted'] = nba_stints['margin'] * np.sqrt(nba_stints['n_pos'])
+
+fig, axes = plt.subplots(1, 2, figsize=(14, 6))
+
+# ── Left: Original margin vs n_pos (heteroscedastic) ──
+axes[0].scatter(nba_stints['n_pos'], nba_stints['margin'],
+                alpha=0.1, s=5, color='steelblue')
+axes[0].axhline(y=0, color='red', linewidth=1, linestyle='--')
+axes[0].set_xlabel('Number of Possessions (n_pos)', fontsize=11)
+axes[0].set_ylabel('Margin (pts per 100 possessions)', fontsize=11)
+axes[0].set_title('Original Margin vs Possessions\n(Heteroscedastic — funnel shape)', 
+                  fontsize=11)
+axes[0].grid(True, alpha=0.3)
+
+# ── Right: Weighted margin vs n_pos (homoscedastic) ──
+axes[1].scatter(nba_stints['n_pos'], nba_stints['margin_weighted'],
+                alpha=0.1, s=5, color='steelblue')
+axes[1].axhline(y=0, color='red', linewidth=1, linestyle='--')
+axes[1].set_xlabel('Number of Possessions (n_pos)', fontsize=11)
+axes[1].set_ylabel('Margin × √n_pos', fontsize=11)
+axes[1].set_title('Weighted Margin vs Possessions\n(Homoscedastic — constant variance)', 
+                  fontsize=11)
+axes[1].grid(True, alpha=0.3)
+
+plt.suptitle('Verifying Possession Weights: Before vs After', 
+             fontsize=13, fontweight='bold')
+plt.tight_layout()
+plt.show()
+```
+
+```{python}
+# ── 2. Verify Numerically ─────────────────────────────────────────────────────
+print("VARIANCE VERIFICATION")
+print("=" * 55)
+print("Original margin std by possession bucket:")
+buckets = pd.cut(nba_stints['n_pos'],
+                 bins=[0, 5, 10, 20, 30, 50, 100, float('inf')],
+                 labels=['1-5','6-10','11-20','21-30','31-50','51-100','100+'])
+
+orig_std     = nba_stints.groupby(buckets, observed=True)['margin'].std()
+weighted_std = nba_stints.groupby(buckets, observed=True)['margin_weighted'].std()
+
+comparison = pd.DataFrame({
+    'Original Std':  orig_std,
+    'Weighted Std':  weighted_std
+}).round(2)
+print(comparison)
+print(f"\nOriginal std range:  {orig_std.min():.2f} to {orig_std.max():.2f}")
+print(f"Weighted std range:  {weighted_std.min():.2f} to {weighted_std.max():.2f}")
+print(f"\nWeighted std is more consistent = variance stabilized")
+```
+
+```{python}
+# ── 3. Fit Weighted Ridge Regression ─────────────────────────────────────────
+n_pos_weights = nba_stints['n_pos'].values
+
+with warnings.catch_warnings():
+    warnings.filterwarnings('ignore', category=RuntimeWarning)
+    ridge_weighted = RidgeCV(
+        alphas        = alphas,
+        fit_intercept = True,
+        cv            = 5
+    )
+    ridge_weighted.fit(X, y, sample_weight=n_pos_weights)
+
+print(f"\nWEIGHTED RIDGE CV RESULTS")
+print(f"{'='*50}")
+print(f"  Optimal alpha:          {ridge_weighted.alpha_:.4f}")
+print(f"  Log10(optimal alpha):   {np.log10(ridge_weighted.alpha_):.2f}")
+print(f"  Intercept (HCA):        {ridge_weighted.intercept_:.4f} pts/100 possessions")
+```
+
+```{python}
+# ── 4. Build Weighted RAPM DataFrame ─────────────────────────────────────────
+weighted_rapm_df = pd.DataFrame({
+    'player_id': player_cols,
+    'RAPM':      ridge_weighted.coef_
+})
+
+weighted_rapm_df['player_id'] = weighted_rapm_df['player_id'].astype(str)
+weighted_rapm_df = weighted_rapm_df.merge(player_names, on='player_id', how='left')
+weighted_rapm_df['minutes_played'] = weighted_rapm_df['player_id'].map(minutes_played)
+weighted_rapm_sorted = weighted_rapm_df.sort_values('RAPM', ascending=False).reset_index(drop=True)
+```
+
+```{python}
+# ── 5. Three Way Comparison: OLS vs Ridge vs Weighted Ridge ──────────────────
+ols_top20      = rapm_sorted.head(20).reset_index(drop=True)
+ridge_top20    = ridge_rapm_sorted.head(20).reset_index(drop=True)
+weighted_top20 = weighted_rapm_sorted.head(20).reset_index(drop=True)
+
+print("\nTOP 20: RIDGE vs WEIGHTED RIDGE")
+print("=" * 90)
+print(f"{'--- RIDGE (Unweighted) ---':<45}  {'--- RIDGE (Weighted) ---':<40}")
+print(f"{'Rank':<5} {'Player':<22} {'RAPM':>6} {'Min':>6}  "
+      f"{'Rank':<5} {'Player':<22} {'RAPM':>6} {'Min':>6}")
+print("-" * 90)
+
+for i in range(20):
+    r_row = ridge_top20.iloc[i]
+    w_row = weighted_top20.iloc[i]
+    
+    r_name = str(r_row['player_name'])[:22]
+    w_name = str(w_row['player_name'])[:22]
+    
+    print(f"{i+1:<5} {r_name:<22} {r_row['RAPM']:>6.2f} {r_row['minutes_played']:>6.0f}  "
+          f"{i+1:<5} {w_name:<22} {w_row['RAPM']:>6.2f} {w_row['minutes_played']:>6.0f}")
+
+print("=" * 90)
+print(f"\n{'SUMMARY COMPARISON':^90}")
+print(f"{'Metric':<35} {'Ridge':>20} {'Weighted Ridge':>20}")
+print("-" * 75)
+print(f"{'Median minutes (Top 20)':<35} "
+      f"{ridge_top20['minutes_played'].median():>20.0f} "
+      f"{weighted_top20['minutes_played'].median():>20.0f}")
+print(f"{'RAPM range (Top 20)':<35} "
+      f"{ridge_top20['RAPM'].min():.2f} to {ridge_top20['RAPM'].max():.2f}{'':>8}"
+      f"{weighted_top20['RAPM'].min():.2f} to {weighted_top20['RAPM'].max():.2f}")
+print(f"{'Optimal Alpha':<35} "
+      f"{ridge.alpha_:>20.2f} "
+      f"{ridge_weighted.alpha_:>20.2f}")
+```
+
+```{python}
+# ── 6. Scatter Plot: Ridge vs Weighted Ridge ──────────────────────────────────
+fig, axes = plt.subplots(1, 2, figsize=(14, 6))
+
+for ax, df, top20, title in zip(
+    axes,
+    [ridge_rapm_df, weighted_rapm_df],
+    [ridge_top20, weighted_top20],
+    ['Ridge RAPM (Unweighted)', f'Weighted Ridge RAPM\n(weights=n_pos)']
+):
+    ax.scatter(df['minutes_played'], df['RAPM'],
+               alpha=0.3, s=15, color='steelblue', label='All Players')
+    ax.scatter(top20['minutes_played'], top20['RAPM'],
+               color='red', s=50, zorder=5, label='Top 20')
+    
+    # Label top 10
+    top10 = df.sort_values('RAPM', ascending=False).head(10)
+    for _, row in top10.iterrows():
+        ax.annotate(str(row['player_name']).split()[-1],
+                    xy=(row['minutes_played'], row['RAPM']),
+                    xytext=(5, 3), textcoords='offset points',
+                    fontsize=7, color='darkred')
+    
+    ax.axhline(y=0, color='black', linewidth=0.8, alpha=0.5)
+    ax.axvline(x=500, color='gray', linestyle='--', linewidth=0.8, alpha=0.7)
+    ax.set_xlabel('Minutes Played', fontsize=11)
+    ax.set_ylabel('RAPM (pts per 100 possessions)', fontsize=11)
+    ax.set_title(title, fontsize=12)
+    ax.legend(fontsize=9)
+    ax.grid(True, alpha=0.3)
+
+plt.suptitle('Ridge vs Weighted Ridge RAPM Rankings',
+             fontsize=13, fontweight='bold')
+plt.tight_layout()
+plt.show()
+```
+
+##### Results:
+
+**Variance Verification:**
+
+Multiplying margin by √n_pos successfully stabilizes variance across possession buckets — the weighted standard deviation ranges narrowly from 113.30 to 132.64 compared to the original 15.78 to 91.55, confirming that Var(margin) ∝ 1/n_pos and that n_pos are the correct weights.
+
+**Weighted Ridge Results:**
+
+\- The optimal alpha increased from 613.59 to 2,477.08 — indicating that weighting by possessions amplifies the signal in long stints, requiring stronger regularization.
+
+-   Top 20 median minutes remained high at 1,924 minutes, confirming that weighted Ridge continues to prioritize players with substantial playing time.
+
+**How Rankings Changed:**
+
+-   Defensive players rose significantly — Draymond Green jumped from rank 7 to rank 2, and Giannis entered the top 10 at rank 7
+-   Offensive-focused players dropped — Trae Young (rank 3) and Coby White (rank 10) fell out of top 20 entirely This suggests weighted Ridge better captures two-way players — those who contribute on both offense and defense across many possessions
+-   RAPM values compressed from a range of 3.17–6.12 to 2.50–4.54, reflecting more conservative and reliable estimates
+
+**Conclusion:** Weighting by n_pos corrects the heteroscedasticity identified in Problem 2a, producing rankings that better reflect sustained performance across long stints rather than short high-margin bursts. By weighting each stint by its number of possessions — making short unreliable stints count less and long reliable stints count more in the RAPM calculation.
+
+### Problem 3: Interpreting Bootstrap Uncertainty
+
+**a. Calculate Confidence Intervals Using the Bootstrap:** Suppose you are a general manager for a basketball team. You want to identify candidate players to add to your team, but you are unsure how certain to be about the ‘RAPM’ coefficients for the model. The bootstrap is a standard approach for calculating confidence intervals for model coefficients. Use either the ‘resample’ function from ‘sklearn’ or ‘np.random.choice’ along with a loop to calculate bootstrap samples of the model coefficients for each player. You may use the optimal ‘alpha’ found during the hyperparameter search in 2(b) for all bootstrap fits. Do not forget to resample the weights when bootstrapping!. For the top 20 players, display the RAPM estimates along with the confidence interval (calculate 92% intervals or some other high value that isn’t 95%). How much do the intervals of the top 20 overlap?
+
+```{python}
+from sklearn.utils import resample
+
+
+# ── 1. Bootstrap Setup ───────────────────────────────────────────────────────
+N_BOOTSTRAP   = 100        # increase to 200-500 if computer is fast
+ALPHA_FIXED   = ridge_weighted.alpha_   # use optimal alpha from 2(b)
+CONFIDENCE    = 0.92       # 92% confidence interval
+lower_pct     = (1 - CONFIDENCE) / 2        # 0.04 = 4th percentile
+upper_pct     = 1 - (1 - CONFIDENCE) / 2    # 0.96 = 96th percentile
+
+print(f"BOOTSTRAP CONFIGURATION")
+print(f"{'='*45}")
+print(f"  Samples:          {N_BOOTSTRAP}")
+print(f"  Fixed alpha:      {ALPHA_FIXED:.2f}")
+print(f"  Confidence level: {CONFIDENCE*100:.0f}%")
+print(f"  Percentiles:      {lower_pct*100:.0f}th - {upper_pct*100:.0f}th")
+print(f"  Data size:        {X.shape[0]:,} stints")
+```
+
+```{python}
+# ── 2. Run Bootstrap ─────────────────────────────────────────────────────────
+bootstrap_coefs = np.zeros((N_BOOTSTRAP, X.shape[1]))
+
+print(f"\nRunning {N_BOOTSTRAP} bootstrap samples...")
+
+for i in range(N_BOOTSTRAP):
+    # Resample X, y, AND weights together
+    X_boot, y_boot, w_boot = resample(
+        X, y, n_pos_weights,
+        replace     = True,
+        random_state= i
+    )
+    
+    # Fit Ridge with fixed optimal alpha
+    with warnings.catch_warnings():
+        warnings.filterwarnings('ignore', category=RuntimeWarning)
+        ridge_boot = RidgeCV(
+            alphas        = [ALPHA_FIXED],
+            fit_intercept = True,
+            cv            = 5
+        )
+        ridge_boot.fit(X_boot, y_boot, sample_weight=w_boot)
+    
+    bootstrap_coefs[i, :] = ridge_boot.coef_
+    
+    if (i + 1) % 10 == 0:
+        print(f"  Completed {i+1}/{N_BOOTSTRAP} samples...")
+
+print(f"Bootstrap complete!")
+print(f"Coefficient matrix shape: {bootstrap_coefs.shape}")
+```
+
+```{python}
+# ── 3. Calculate Confidence Intervals ────────────────────────────────────────
+# Point estimates from weighted ridge
+rapm_point = ridge_weighted.coef_
+
+# Bootstrap CI
+rapm_lower = np.percentile(bootstrap_coefs, lower_pct * 100, axis=0)
+rapm_upper = np.percentile(bootstrap_coefs, upper_pct * 100, axis=0)
+rapm_std   = bootstrap_coefs.std(axis=0)
+
+# Build results dataframe
+bootstrap_df = pd.DataFrame({
+    'player_id':   player_cols,
+    'RAPM':        rapm_point,
+    'RAPM_lower':  rapm_lower,
+    'RAPM_upper':  rapm_upper,
+    'RAPM_std':    rapm_std,
+    'CI_width':    rapm_upper - rapm_lower
+})
+
+# Merge with player names and minutes
+bootstrap_df['player_id'] = bootstrap_df['player_id'].astype(str)
+bootstrap_df = bootstrap_df.merge(player_names, on='player_id', how='left')
+bootstrap_df['minutes_played'] = bootstrap_df['player_id'].map(minutes_played)
+
+# Sort by RAPM
+bootstrap_sorted = bootstrap_df.sort_values('RAPM', ascending=False).reset_index(drop=True)
+```
+
+```{python}
+# ── 4. Display Top 20 with Confidence Intervals ───────────────────────────────
+print(f"\nTOP 20 PLAYERS WITH {CONFIDENCE*100:.0f}% BOOTSTRAP CONFIDENCE INTERVALS")
+print("=" * 85)
+print(f"{'Rank':<5} {'Player':<22} {'RAPM':>7} "
+      f"{'Lower':>8} {'Upper':>8} {'CI Width':>9} {'Minutes':>8}")
+print("-" * 85)
+
+top20_boot = bootstrap_sorted.head(20)
+for i, row in top20_boot.iterrows():
+    print(f"{i+1:<5} {str(row['player_name']):<22} "
+          f"{row['RAPM']:>7.3f} "
+          f"{row['RAPM_lower']:>8.3f} "
+          f"{row['RAPM_upper']:>8.3f} "
+          f"{row['CI_width']:>9.3f} "
+          f"{row['minutes_played']:>8.0f}")
+
+print(f"\n{'='*85}")
+print(f"Average CI width (Top 20): {top20_boot['CI_width'].mean():.3f}")
+print(f"Min CI width:              {top20_boot['CI_width'].min():.3f}")
+print(f"Max CI width:              {top20_boot['CI_width'].max():.3f}")
+```
+
+```{python}
+# ── 5. Visualize Confidence Intervals ────────────────────────────────────────
+fig, axes = plt.subplots(1, 2, figsize=(16, 8))
+
+# ── Left: CI Plot for Top 20 ──
+top20_plot = bootstrap_sorted.head(20).copy()
+top20_plot['short_name'] = top20_plot['player_name'].apply(
+    lambda x: str(x).split()[-1])   # last name only
+
+y_pos = np.arange(len(top20_plot))
+
+axes[0].barh(y_pos,
+             top20_plot['RAPM_upper'] - top20_plot['RAPM_lower'],
+             left  = top20_plot['RAPM_lower'],
+             height= 0.6,
+             color = 'steelblue', alpha=0.4, label='92% CI')
+
+axes[0].scatter(top20_plot['RAPM'], y_pos,
+                color='darkblue', s=50, zorder=5, label='RAPM estimate')
+
+axes[0].axvline(x=0, color='red', linestyle='--', linewidth=1, alpha=0.7)
+axes[0].set_yticks(y_pos)
+axes[0].set_yticklabels(top20_plot['short_name'], fontsize=9)
+axes[0].set_xlabel('RAPM (pts per 100 possessions)', fontsize=11)
+axes[0].set_title(f'Top 20 RAPM with {CONFIDENCE*100:.0f}% Bootstrap CI\n'
+                  f'(n={N_BOOTSTRAP} bootstrap samples)', fontsize=11)
+axes[0].legend(fontsize=9)
+axes[0].grid(True, alpha=0.3, axis='x')
+axes[0].invert_yaxis()
+
+# ── Right: CI Width vs Minutes ──
+axes[1].scatter(bootstrap_df['minutes_played'],
+                bootstrap_df['CI_width'],
+                alpha=0.4, s=15, color='steelblue', label='All players')
+axes[1].scatter(top20_plot['minutes_played'],
+                top20_plot['CI_width'],
+                color='red', s=50, zorder=5, label='Top 20')
+
+axes[1].set_xlabel('Minutes Played', fontsize=11)
+axes[1].set_ylabel('CI Width', fontsize=11)
+axes[1].set_title('Confidence Interval Width vs Minutes Played\n'
+                  '(More minutes = narrower CI)', fontsize=11)
+axes[1].legend(fontsize=9)
+axes[1].grid(True, alpha=0.3)
+
+plt.suptitle('Bootstrap Uncertainty in RAPM Estimates',
+             fontsize=13, fontweight='bold')
+plt.tight_layout()
+plt.show()
+```
+
+```{python}
+# ── 6. Overlap Analysis ───────────────────────────────────────────────────────
+print(f"\nCI OVERLAP ANALYSIS - TOP 20")
+print("=" * 55)
+
+# Check how many top 20 CIs overlap with rank 1 player
+rank1_lower = top20_boot.iloc[0]['RAPM_lower']
+rank1_upper = top20_boot.iloc[0]['RAPM_upper']
+rank1_name  = top20_boot.iloc[0]['player_name']
+
+print(f"Rank 1: {rank1_name}")
+print(f"CI: [{rank1_lower:.3f}, {rank1_upper:.3f}]")
+print(f"\nOverlap with Rank 1:")
+print("-" * 55)
+
+overlap_count = 0
+for i, row in top20_boot.iterrows():
+    # Two intervals overlap if lower1 < upper2 AND upper1 > lower2
+    overlaps = (row['RAPM_lower'] < rank1_upper and 
+                row['RAPM_upper'] > rank1_lower)
+    if overlaps:
+        overlap_count += 1
+    rank = i + 1
+    flag = " overlaps" if overlaps else " no overlap"
+    print(f"  Rank {rank:<3} {str(row['player_name']):<22} "
+          f"[{row['RAPM_lower']:>6.3f}, {row['RAPM_upper']:>6.3f}] {flag}")
+
+print(f"\n{overlap_count}/20 players overlap with Rank 1 CI")
+```
+
+**Bootstrap CI Results:** The 92% bootstrap confidence intervals reveal substantial uncertainty in RAPM estimates across all top 20 players.
+
+The average CI width is 3.696 points per 100 possessions — meaning most players' true RAPM could plausibly range across nearly 4 points in either direction.
+
+**Overlap Analysis:**
+
+All 20 top players' confidence intervals overlap with the rank 1 player (Jokic, CI: \[2.536, 6.494\]). This means we cannot statistically distinguish between any of the top 20 players with 92% confidence — the rankings reflect point estimates but carry significant uncertainty.
+
+**Key Observations:**
+
+\- Players with highest lower bounds are safest picks: Anthony Davis (lower=2.336), Draymond Green (lower=2.727), and Jokic (lower=2.536) all have lower bounds above 2.0 — even in the worst case scenario they are well above average
+
+\- Christian Koloko (758 min) and Boban Marjanovic (167 min) appear in top 20 despite limited minutes — their wide CIs and low lower bounds make them high-risk picks -
+
+All top 20 lower bounds are above zero, confirming every player is likely above average even accounting for uncertainty
+
+*Result: 20/20 players overlap with Rank 1*
+
+**What it means:**
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+We CANNOT statistically prove that Jokic (Rank 1) is better than any of the other top 20 players
+
+All their confidence intervals share at least some common values with Jokic
+
+As GM: Don't obsess over exact rankings Focus on lower bound instead
+
+**b. Impact of Minutes Played on Confidence Intervals:** One potential use of a model like this is to find players who do not play much but who might do well with more opportunity. Calculate the standard errors of each coefficient from the bootstrap samples and make a scatterplot of standard error versus minutes played. Comment on the relationship between minutes played and standard error- does it make sense to you intuitively and/or statistically?
+
+```{python}
+
+# ── Standard Error vs Minutes Plot ───────────────────────────────────────────
+fig, ax = plt.subplots(figsize=(10, 6))
+
+ax.scatter(bootstrap_df['minutes_played'],
+           bootstrap_df['RAPM_std'],          # RAPM_std = standard error
+           alpha=0.4, s=15, color='steelblue', label='All players')
+
+ax.scatter(top20_boot['minutes_played'],
+           top20_boot['RAPM_std'],
+           color='red', s=50, zorder=5, label='Top 20')
+
+# Add theoretical 1/sqrt(minutes) curve
+min_range = np.linspace(
+    bootstrap_df['minutes_played'].min() + 1,
+    bootstrap_df['minutes_played'].max(), 300)
+
+# Scale curve to data
+scale = bootstrap_df['RAPM_std'].median() * np.sqrt(
+        bootstrap_df['minutes_played'].median())
+theoretical = scale / np.sqrt(min_range)
+
+ax.plot(min_range, theoretical, color='red',
+        linewidth=2, linestyle='--',
+        label='Theoretical 1/√minutes')
+
+ax.set_xlabel('Minutes Played', fontsize=12)
+ax.set_ylabel('Standard Error of RAPM', fontsize=12)
+ax.set_title('Standard Error vs Minutes Played\n'
+             '(More minutes = more certain RAPM estimate)', fontsize=12)
+ax.legend(fontsize=10)
+ax.grid(True, alpha=0.3)
+plt.tight_layout()
+plt.show()
+
+# Print summary stats
+print("STANDARD ERROR vs MINUTES SUMMARY")
+print("=" * 50)
+
+low_min  = bootstrap_df[bootstrap_df['minutes_played'] < 200]['RAPM_std'].mean()
+mid_min  = bootstrap_df[(bootstrap_df['minutes_played'] >= 200) & 
+                         (bootstrap_df['minutes_played'] < 1000)]['RAPM_std'].mean()
+high_min = bootstrap_df[bootstrap_df['minutes_played'] >= 1000]['RAPM_std'].mean()
+
+print(f"  Avg SE  (<200 min):    {low_min:.4f}  ← high uncertainty")
+print(f"  Avg SE  (200-1000 min):{mid_min:.4f}")
+print(f"  Avg SE  (>1000 min):   {high_min:.4f}  ← low uncertainty")
+print(f"\n  Ratio high/low SE:     {low_min/high_min:.2f}x more uncertain")
+```
+
+*This Seems Counterintuitive*
+
+**Expected:** more minutes = lower SE
+
+**Actual:** very low minute players have LOWEST SE
+
+**Reason:** Ridge regularization shrinks low-minute players coefficients toward zero
+
+**Players with \<200 minutes:** - Ridge shrinks their RAPM close to zero
+
+-   Every bootstrap sample also shrinks them to \~zero
+
+-   Coefficients barely move across samples
+
+-   Artificially LOW standard error
+
+-   This is NOT confidence — it is shrinkage
+
+Players with 200-1000 minutes show the highest uncertainty as they have enough data to escape full shrinkage but not enough for stable estimates. Beyond 1000 minutes SE stabilizes, reflecting genuine statistical confidence from sufficient playing time.
+
+**c. Comparison to Bayesian Credible Intervals:** Bayesian statistics (which you should have learned about briefly in DATA 606) is a field of statistics based on an interpretation of probability as referring to uncertainty about the real world rather than as the frequency of outcomes in repeated experiments. In the Bayesian framework, it is normal to talk about the probability distribution of model parameters, which leads to the concept of a ‘credible interval’, defined as an interval with a certain probability of containing the model parameter (a 92% credible interval would have a 92% chance of containing the model parameter). Credible intervals often correspond closely to confidence intervals captured using standard statistics, but this problem is one case where they diverge sharply. Ridge regression has an interpretation in Bayesian statistics, where the regulrization parameter corresponds to the strength of a prior belief that the model coefficients have a normal distribution centered around zero and with variance inversely proportional to the regularization penalty . For ridge regression interpreted as Bayesian statistics, there is an exact formula for the standard errors and confidence intervals which we can use to contrast with the bootstrap estimate. I have provided code below to calculate the standard errors and the Bayesian credible intervals (if you are curious about the full details read this article). You will need to adapt this code to your variable names and data structures:
+
+```{python}
+# ── 1. Prepare Variables ─────────────────────────────────────────────────────
+weights     = n_pos_weights                    # possession weights
+stint_mat   = X                                # player matrix
+margin_vec  = y                                # target variable
+alpha_opt   = ridge_weighted.alpha_            # optimal alpha = 2477.08
+model_ridge = ridge_weighted                   # fitted weighted ridge model
+
+print(f"BAYESIAN CREDIBLE INTERVAL CALCULATION")
+print(f"{'='*50}")
+print(f"  Alpha (regularization): {alpha_opt:.2f}")
+print(f"  Stint matrix shape:     {stint_mat.shape}")
+print(f"  Weights shape:          {weights.shape}")
+```
+
+```{python}
+
+# ── 2. Calculate Bayesian Standard Errors ────────────────────────────────────
+# Step 1: Weighted residual variance
+var = np.average(
+    (margin_vec - model_ridge.predict(stint_mat))**2,
+    weights = weights
+)
+
+num_players = stint_mat.shape[1]
+print(f"  Residual variance:      {var:.4f}")
+print(f"  Number of players:      {num_players}")
+
+# Step 2: A matrix = weighted data info + prior info
+AMat = (stint_mat * weights.reshape(-1, 1)).T @ stint_mat + \
+        alpha_opt * np.eye(num_players)
+
+print(f"  AMat shape:             {AMat.shape}")
+
+# Step 3: Posterior covariance matrix
+print(f"\n  Inverting {num_players}x{num_players} matrix...")
+posterior_covariance = var * np.linalg.inv(AMat)
+print(f"  Covariance matrix computed ✅")
+
+# Step 4: Standard errors = sqrt of diagonal
+se_bayesian = np.sqrt(np.diag(posterior_covariance))
+print(f"\n  Bayesian SE range: {se_bayesian.min():.4f} to {se_bayesian.max():.4f}")
+```
+
+```{python}
+# ── 3. Add Bayesian SE to DataFrame ──────────────────────────────────────────
+bootstrap_df['SE_bayesian']  = se_bayesian
+bootstrap_df['SE_bootstrap'] = bootstrap_df['RAPM_std']   # already calculated
+bootstrap_df['SE_ratio']     = (bootstrap_df['SE_bayesian'] / 
+                                bootstrap_df['SE_bootstrap'])
+
+# Bayesian credible intervals
+z_92 = 1.75   # z-score for 92% interval
+bootstrap_df['Bayes_lower'] = bootstrap_df['RAPM'] - z_92 * bootstrap_df['SE_bayesian']
+bootstrap_df['Bayes_upper'] = bootstrap_df['RAPM'] + z_92 * bootstrap_df['SE_bayesian']
+
+print(f"\nSE COMPARISON SUMMARY")
+print(f"{'='*55}")
+print(f"{'Metric':<30} {'Bayesian':>12} {'Bootstrap':>12}")
+print(f"{'-'*55}")
+print(f"{'Mean SE':<30} {se_bayesian.mean():>12.4f} "
+      f"{bootstrap_df['SE_bootstrap'].mean():>12.4f}")
+print(f"{'Median SE':<30} {np.median(se_bayesian):>12.4f} "
+      f"{bootstrap_df['SE_bootstrap'].median():>12.4f}")
+print(f"{'Min SE':<30} {se_bayesian.min():>12.4f} "
+      f"{bootstrap_df['SE_bootstrap'].min():>12.4f}")
+print(f"{'Max SE':<30} {se_bayesian.max():>12.4f} "
+      f"{bootstrap_df['SE_bootstrap'].max():>12.4f}")
+```
+
+```{python}
+# ── 4. Plot Bayesian SE vs Minutes ────────────────────────────────────────────
+fig, axes = plt.subplots(1, 3, figsize=(18, 6))
+
+# ── Left: Bayesian SE vs Minutes ──
+axes[0].scatter(bootstrap_df['minutes_played'],
+                bootstrap_df['SE_bayesian'],
+                alpha=0.4, s=15, color='steelblue')
+axes[0].set_xlabel('Minutes Played', fontsize=11)
+axes[0].set_ylabel('Standard Error', fontsize=11)
+axes[0].set_title('Bayesian SE vs Minutes', fontsize=12)
+axes[0].grid(True, alpha=0.3)
+
+# ── Middle: Bootstrap SE vs Minutes ──
+axes[1].scatter(bootstrap_df['minutes_played'],
+                bootstrap_df['SE_bootstrap'],
+                alpha=0.4, s=15, color='darkorange')
+axes[1].set_xlabel('Minutes Played', fontsize=11)
+axes[1].set_ylabel('Standard Error', fontsize=11)
+axes[1].set_title('Bootstrap SE vs Minutes', fontsize=12)
+axes[1].grid(True, alpha=0.3)
+
+# ── Right: Both overlaid for comparison ──
+axes[2].scatter(bootstrap_df['minutes_played'],
+                bootstrap_df['SE_bayesian'],
+                alpha=0.4, s=15, color='steelblue', 
+                label='Bayesian')
+axes[2].scatter(bootstrap_df['minutes_played'],
+                bootstrap_df['SE_bootstrap'],
+                alpha=0.4, s=15, color='darkorange',
+                label='Bootstrap')
+axes[2].set_xlabel('Minutes Played', fontsize=11)
+axes[2].set_ylabel('Standard Error', fontsize=11)
+axes[2].set_title('Bayesian vs Bootstrap SE\n(Comparison)', fontsize=12)
+axes[2].legend(fontsize=10)
+axes[2].grid(True, alpha=0.3)
+
+plt.suptitle('Bayesian vs Bootstrap Standard Errors',
+             fontsize=13, fontweight='bold')
+plt.tight_layout()
+plt.show()
+```
+
+```{python}
+# ── 5. Agreement Analysis ─────────────────────────────────────────────────────
+print(f"\nAGREEMENT ANALYSIS BY MINUTES BUCKET")
+print(f"{'='*65}")
+print(f"{'Minutes':<15} {'Bayes SE':>10} {'Boot SE':>10} "
+      f"{'Ratio':>8} {'Agreement':>12}")
+print(f"{'-'*65}")
+
+buckets = [
+    ('<200',    0,    200),
+    ('200-500', 200,  500),
+    ('500-1000',500,  1000),
+    ('>1000',   1000, float('inf'))
+]
+
+for label, low, high in buckets:
+    mask = ((bootstrap_df['minutes_played'] >= low) & 
+            (bootstrap_df['minutes_played'] <  high))
+    subset = bootstrap_df[mask]
+    
+    if len(subset) == 0:
+        continue
+        
+    bayes_se = subset['SE_bayesian'].mean()
+    boot_se  = subset['SE_bootstrap'].mean()
+    ratio    = bayes_se / boot_se
+    
+    if 0.8 <= ratio <= 1.2:
+        agreement = "HIGH"
+    elif 0.5 <= ratio <= 1.5:
+        agreement = "MODERATE"
+    else:
+        agreement = "LOW"
+    
+    print(f"{label:<15} {bayes_se:>10.4f} {boot_se:>10.4f} "
+          f"{ratio:>8.2f} {agreement:>12}")
+```
+
+[**Overall SE Comparison**]{.underline}
+
+-   Bayesian SE range: 0.48 to 0.91 ← narrow, consistent 
+
+-   Bootstrap SE range: 0.09 to 1.38 ← wide, inconsistent 
+
+-   Bayesian mean SE: 0.66 
+
+-   Bootstrap mean SE: 1.02 ← 55% larger on average
+
+**Minutes Bayes SE Boot SE Ratio**
+
+-   \<200 0.86 0.66 1.30 ← Bayes HIGHER
+
+-   200-500 0.74 1.08 0.69 ← Bootstrap HIGHER
+
+-   500-1000 0.64 1.16 0.55 ← Bootstrap HIGHER
+
+-   \>1000 0.56 1.10 0.51 ← Bootstrap HIGHER
+
+```{python}
+fig, ax = plt.subplots(figsize=(10, 6))
+
+ax.scatter(bootstrap_df['minutes_played'],
+           bootstrap_df['SE_bayesian'],
+           alpha=0.4, s=15, color='steelblue',
+           label='Bayesian SE')
+ax.scatter(bootstrap_df['minutes_played'],
+           bootstrap_df['SE_bootstrap'],
+           alpha=0.4, s=15, color='darkorange',
+           label='Bootstrap SE')
+
+# Mark the crossover point
+ax.axvline(x=200, color='red', linestyle='--',
+           linewidth=1.5, label='Crossover (~200 min)')
+
+ax.set_xlabel('Minutes Played', fontsize=12)
+ax.set_ylabel('Standard Error', fontsize=12)
+ax.set_title('Bayesian vs Bootstrap SE\nCrossover at ~200 minutes',
+             fontsize=12)
+ax.legend(fontsize=10)
+ax.grid(True, alpha=0.3)
+plt.tight_layout()
+plt.show()
+```
+
+Crossover happened at 200 minutes
+
+**Agreement:**
+
+```         
+Highest agreement: <200 minutes (ratio=1.30)
+→ Both methods closest here
+→ Still only MODERATE agreement
+→ No region shows truly HIGH agreement
+```
+
+**Disagreement:**
+
+Highest disagreement: \>1000 minutes (ratio=0.51) → Bootstrap SE twice as large as Bayesian SE
+
+→ Completely opposite of what was expected
+
+**Which is More Realistic:**
+
+*For low minute players (\<200 min):*
+
+```         
+Bayesian SE:   0.86  ← higher, more uncertain
+Bootstrap SE:  0.66  ← lower, falsely confident
+
+*Bayesian is more realistic here*
+
+→ Correctly recognizes limited data = high uncertainty
+→ Bootstrap is fooled by Ridge shrinkage
+→ Low minute players shrunk to zero consistently
+→ Gives artificially low SE
+```
+
+*For high minute players (\>1000 min):*
+
+```         
+Bayesian SE:   0.56  ← lower, more confident
+Bootstrap SE:  1.10  ← higher, more uncertain
+
+Bayesian is more realistic here too
+→ 1000+ minutes = lots of data = should be confident
+→ Bootstrap overestimates uncertainty for star players
+→ Resampling creates variation that isn't really there
+→ Bayesian formula correctly uses all information
+```
+
+**Conclusion:**
+
+```         
+Bayesian credible intervals are more realistic 
+across ALL minute ranges because:
+
+1. Low minute players:
+   Bayesian correctly shows HIGH uncertainty
+   Bootstrap falsely shows low SE due to shrinkage
+
+2. High minute players:
+   Bayesian correctly shows LOW uncertainty  
+   Bootstrap overestimates uncertainty
+
+The Bayesian formula accounts for the exact
+information content in the data mathematically,
+while Bootstrap is distorted by Ridge 
+regularization at both extremes of minutes played
+
+As a GM: Trust Bayesian intervals over Bootstrap
+         for both identifying reliable stars AND
+         flagging uncertain low-minute players
+```
+
+### Extra Credit (5 Points): Ridge versus Lasso and Confidence/Credible Interval Calculations
+
+a\. An alternative to ridge regression that is used for variable selection is called the Lasso. The Lasso differs penalty causes a large number of model coefficients to be zero, making it a good tool for variable selection and for creating interpretable models. Use ‘LassoCV’ to calculate the ‘RAPM’ coefficients. I recommend using regularization weights that range between and (the scale needs to be different compared to ridge regression). Compare the ‘RAPM’ values calculated with lasso to those calculated with ridge regression. Are there any notable differences in the top 20 players? Find the 10 players with the largest difference between lasso RAPM and Ridge RAPM in both directions (ridge greater than lasso and lasso greater than ridge). Within the players where there was large disagreement, consider how the players performed in the next NBA season (you may do this however you like, I recommend reading media reports about those players during the next season) and determine which model was more correct when it comes to players with large disagreements.
+
+Intuition
+
+```         
+**The Key Difference**
+
+RIDGE:                    LASSO:
+Shrinks ALL coefficients  Sets MANY coefficients
+toward zero               exactly TO zero
+
+Like turning down         Like turning OFF
+a dimmer switch           a light switch
+
+Player with little data:  Player with little data:
+Ridge RAPM → 0.5          Lasso RAPM → 0.0 exactly
+(small but exists)        (completely removed)
+```
+
+Result: Lasso keeps only players with enough data to make a judgment = automatic variable selection
+
+```{python}
+from sklearn.linear_model import LassoCV
+import warnings
+
+# ── 1. Define Alpha Range for Lasso ─────────────────────────────────────────
+# Lasso needs different scale than Ridge
+lasso_alphas = np.logspace(-3, 1, 100)
+
+print(f"LASSO CONFIGURATION")
+print(f"{'='*45}")
+print(f"  Alpha range: {lasso_alphas[0]:.4f} to {lasso_alphas[-1]:.2f}")
+print(f"  Number of alphas: {len(lasso_alphas)}")
+```
+
+```{python}
+# ── 2. Fit Lasso with Cross Validation ───────────────────────────────────────
+with warnings.catch_warnings():
+    warnings.filterwarnings('ignore')
+    lasso = LassoCV(
+        alphas        = lasso_alphas,
+        fit_intercept = True,
+        cv            = 5,
+        max_iter      = 10000    # Lasso needs more iterations
+    )
+    lasso.fit(X, y, sample_weight=n_pos_weights)
+
+print(f"LASSO CV RESULTS")
+print(f"{'='*50}")
+print(f"  Optimal alpha:        {lasso.alpha_:.6f}")
+print(f"  Log10(alpha):         {np.log10(lasso.alpha_):.2f}")
+print(f"  Intercept (HCA):      {lasso.intercept_:.4f}")
+print(f"  Non-zero coefs:       {(lasso.coef_ != 0).sum()}")
+print(f"  Zero coefs:           {(lasso.coef_ == 0).sum()}")
+print(f"  % players zeroed out: {(lasso.coef_ == 0).sum()/len(lasso.coef_)*100:.1f}%")
+```
+
+```{python}
+# ── 3. Build Lasso RAPM DataFrame ────────────────────────────────────────────
+lasso_rapm_df = pd.DataFrame({
+    'player_id': player_cols,
+    'RAPM_lasso': lasso.coef_
+})
+
+lasso_rapm_df['player_id'] = lasso_rapm_df['player_id'].astype(str)
+lasso_rapm_df = lasso_rapm_df.merge(player_names, on='player_id', how='left')
+lasso_rapm_df['minutes_played'] = lasso_rapm_df['player_id'].map(minutes_played)
+
+lasso_rapm_sorted = lasso_rapm_df.sort_values(
+    'RAPM_lasso', ascending=False).reset_index(drop=True)
+
+print(f"\nTOP 20 PLAYERS BY LASSO RAPM")
+print(f"{'='*65}")
+print(f"{'Rank':<5} {'Player':<25} {'RAPM_Lasso':>12} {'Minutes':>10}")
+print(f"{'-'*65}")
+for i, row in lasso_rapm_sorted.head(20).iterrows():
+    print(f"{i+1:<5} {str(row['player_name']):<25} "
+          f"{row['RAPM_lasso']:>12.4f} "
+          f"{row['minutes_played']:>10.0f}")
+```
+
+```{python}
+# ── 4. Compare Ridge vs Lasso Top 20 ─────────────────────────────────────────
+ridge_top20 = weighted_rapm_sorted.head(20).reset_index(drop=True)
+lasso_top20 = lasso_rapm_sorted.head(20).reset_index(drop=True)
+
+print(f"\nRIDGE vs LASSO TOP 20 COMPARISON")
+print(f"{'='*90}")
+print(f"{'--- RIDGE ---':<45}  {'--- LASSO ---':<45}")
+print(f"{'Rank':<5} {'Player':<22} {'RAPM':>8} {'Min':>6}  "
+      f"{'Rank':<5} {'Player':<22} {'RAPM':>8} {'Min':>6}")
+print(f"{'-'*90}")
+
+for i in range(20):
+    r = ridge_top20.iloc[i]
+    l = lasso_top20.iloc[i]
+    print(f"{i+1:<5} {str(r['player_name']):<22} "
+          f"{r['RAPM']:>8.3f} {r['minutes_played']:>6.0f}  "
+          f"{i+1:<5} {str(l['player_name']):<22} "
+          f"{l['RAPM_lasso']:>8.3f} {l['minutes_played']:>6.0f}")
+```
+
+**Top 20 Comparison Analysis**
+
+*Where They Agree*
+
+**Both have in top 20:**
+
+→ Jokic, Draymond, Embiid, Kawhi
+
+→ Anthony Davis, Jrue Holiday
+
+→ Giannis, Zion, Josh Hart
+
+→ Jayson Tatum, Derrick White
+
+Core elite players identified by BOTH models = high confidence these are truly good players
+
+```{python}
+# ── 5. Find Largest Disagreements ────────────────────────────────────────────
+# Merge Ridge and Lasso on player_id
+comparison_df = weighted_rapm_df[['player_id', 'player_name', 
+                                   'RAPM', 'minutes_played']].copy()
+comparison_df = comparison_df.merge(
+    lasso_rapm_df[['player_id', 'RAPM_lasso']], 
+    on='player_id', how='inner'
+)
+
+comparison_df['difference'] = comparison_df['RAPM'] - comparison_df['RAPM_lasso']
+
+# Ridge > Lasso (top 10)
+ridge_greater = comparison_df.nlargest(10, 'difference')
+
+# Lasso > Ridge (top 10)
+lasso_greater = comparison_df.nsmallest(10, 'difference')
+
+print(f"\nTOP 10: RIDGE RAPM > LASSO RAPM")
+print(f"{'='*75}")
+print(f"{'Player':<22} {'Ridge':>8} {'Lasso':>8} {'Diff':>8} {'Minutes':>8}")
+print(f"{'-'*75}")
+for _, row in ridge_greater.iterrows():
+    print(f"{str(row['player_name']):<22} "
+          f"{row['RAPM']:>8.3f} "
+          f"{row['RAPM_lasso']:>8.3f} "
+          f"{row['difference']:>+8.3f} "
+          f"{row['minutes_played']:>8.0f}")
+
+print(f"\nTOP 10: LASSO RAPM > RIDGE RAPM")
+print(f"{'='*75}")
+print(f"{'Player':<22} {'Ridge':>8} {'Lasso':>8} {'Diff':>8} {'Minutes':>8}")
+print(f"{'-'*75}")
+for _, row in lasso_greater.iterrows():
+    print(f"{str(row['player_name']):<22} "
+          f"{row['RAPM']:>8.3f} "
+          f"{row['RAPM_lasso']:>8.3f} "
+          f"{row['difference']:>+8.3f} "
+          f"{row['minutes_played']:>8.0f}")
+```
+
+**Disagreement Analysis**
+
+Ridge \> Lasso (Ridge gives more credit)
+
+*8 out of 10 players have Lasso RAPM = 0* These are players Ridge credits but Lasso completely ignores:
+
+-   Clint Capela: Ridge=1.525 Lasso=0 1,696 min
+-   Gordon Hayward: Ridge=1.382 Lasso=0 1,450 min
+
+Lasso \> Ridge (Lasso gives more credit)
+
+Interesting pattern - mostly NEGATIVE players:
+
+-   Johnny Juzang: Ridge=-1.932 Lasso=-0.051
+
+-   Jeff Dowtin Jr.: Ridge=-1.854 Lasso=-0.007
+
+Lasso zeroes these OUT (sets to \~0) Ridge says they are ACTIVELY HURTING team
+
+*Joel Embiid exception:*
+
+Ridge=4.180 Lasso=5.880 Diff=-1.699
+
+Lasso gives Embiid MORE credit than Ridge
+
+\- Lasso sees his contribution as more unique
+
+\- Less shared with teammates
+
+```{python}
+# ── 6. Scatter Plot Ridge vs Lasso RAPM ──────────────────────────────────────
+fig, axes = plt.subplots(1, 2, figsize=(14, 6))
+
+# ── Left: Ridge vs Lasso scatter ──
+axes[0].scatter(comparison_df['RAPM'],
+                comparison_df['RAPM_lasso'],
+                alpha=0.4, s=15, color='steelblue')
+axes[0].plot([comparison_df['RAPM'].min(),
+              comparison_df['RAPM'].max()],
+             [comparison_df['RAPM'].min(),
+              comparison_df['RAPM'].max()],
+             'r--', linewidth=1.5, label='Perfect agreement')
+axes[0].set_xlabel('Ridge RAPM', fontsize=11)
+axes[0].set_ylabel('Lasso RAPM', fontsize=11)
+axes[0].set_title('Ridge vs Lasso RAPM\n(Points on line = perfect agreement)',
+                  fontsize=11)
+axes[0].legend(fontsize=9)
+axes[0].grid(True, alpha=0.3)
+
+# ── Right: Difference vs Minutes ──
+axes[1].scatter(comparison_df['minutes_played'],
+                comparison_df['difference'],
+                alpha=0.4, s=15, color='steelblue')
+axes[1].axhline(y=0, color='red', linestyle='--', linewidth=1.5)
+axes[1].set_xlabel('Minutes Played', fontsize=11)
+axes[1].set_ylabel('Ridge RAPM - Lasso RAPM', fontsize=11)
+axes[1].set_title('Disagreement vs Minutes Played\n'
+                  '(Above zero = Ridge higher)',
+                  fontsize=11)
+axes[1].grid(True, alpha=0.3)
+
+plt.suptitle('Ridge vs Lasso RAPM Comparison',
+             fontsize=13, fontweight='bold')
+plt.tight_layout()
+plt.show()
+```
+
+```{python}
+# ── 7. Summary Statistics ─────────────────────────────────────────────────────
+print(f"\nSUMMARY: RIDGE vs LASSO")
+print(f"{'='*55}")
+print(f"{'Metric':<35} {'Ridge':>10} {'Lasso':>10}")
+print(f"{'-'*55}")
+print(f"{'Non-zero coefficients':<35} "
+      f"{(weighted_rapm_df['RAPM'] != 0).sum():>10} "
+      f"{(lasso.coef_ != 0).sum():>10}")
+print(f"{'Mean RAPM (all players)':<35} "
+      f"{weighted_rapm_df['RAPM'].mean():>10.4f} "
+      f"{lasso_rapm_df['RAPM_lasso'].mean():>10.4f}")
+print(f"{'Max RAPM':<35} "
+      f"{weighted_rapm_df['RAPM'].max():>10.4f} "
+      f"{lasso_rapm_df['RAPM_lasso'].max():>10.4f}")
+print(f"{'Min RAPM':<35} "
+      f"{weighted_rapm_df['RAPM'].min():>10.4f} "
+      f"{lasso_rapm_df['RAPM_lasso'].min():>10.4f}")
+print(f"{'Optimal Alpha':<35} "
+      f"{ridge_weighted.alpha_:>10.2f} "
+      f"{lasso.alpha_:>10.6f}")
+print(f"{'Players zeroed out':<35} "
+      f"{'0':>10} "
+      f"{(lasso.coef_ == 0).sum():>10}")
+```
+
+Summary Findings 1. Aggressive Variable Selection: Lasso zeroed out 342 of 539 players (63.5%), keeping only 197 players with non-zero coefficients. This confirms that the majority of NBA players in this dataset do not have enough unique statistical signal to distinguish their individual contribution from noise — Ridge assigned all 539 players small coefficients while Lasso made a definitive judgment that most bench and low-minute players cannot be reliably evaluated.
+
+2.  More Extreme RAPM Range: Lasso produced more extreme values in both directions — max RAPM of 5.88 vs Ridge's 4.54, and min RAPM of -4.96 vs Ridge's -3.85. By zeroing out 342 players, Lasso concentrates all the explanatory signal into the remaining 197 players, giving them larger coefficients in both positive and negative directions.
+
+3.  Optimal Alpha Scale Difference: The optimal alpha for Lasso (0.026) is dramatically smaller than Ridge (2477.08) — nearly 100,000 times smaller. This reflects a fundamental difference in how the two penalties work: Lasso's absolute value penalty is inherently stronger at producing zero coefficients, so it requires far less regularization strength to achieve the same level of shrinkage that Ridge needs a very large alpha to accomplish.
+
+**Conclusion** Lasso is better at:
+
+\- Variable selection (removing noise players)
+
+\- Identifying independently elite players
+
+\- Surfacing stars hidden in Ridge top 20 (Shai, Markkanen, Durant)
+
+Ridge is better at:
+
+\- Capturing role players and team contributors
+
+\- Distributing credit among teammates
+
+\- Not over-penalizing low minute players who may genuinely contribute
+
+*For a GM: Use BOTH models together* Players in BOTH top 20 = highest confidence Players in only one = worth investigating further
+
+[**Online search and results:**]{.underline}
+
+**Player name:** CLINT CAPELA
+
+Player 2023-2024 stats link: [https://www.espn.com/nba/player/stats/\_/id/3102529/clint-capela](clint-capela-stats)
+
+*Stats Regular Season Averages*
+
+GP = 73 ← MOST IMPORTANT
+
+MIN = 25.8 ← SECOND MOST IMPORTANT\
+PTS = 11.5 ← SUPPORTING EVIDENCE
+
+**Conclusion based on stats**Clint Capela
+
+played 73 games averaging 25.8 minutes as a starter in 2023-24,
+
+confirming Ridge was more correct — his contribution was real and Lasso incorrectly zeroed him out.
+
+**Player Name:** Gordon Hayward (Ridge=1.382, Lasso=0)
+
+player 2023-2024 stats link: [https://www.espn.com/nba/player/stats/\_/id/4249/gordon-hayward](gordon-hayward-stats)
+
+Charlotte (CHA): 25 GP 25 GS 31.9 MIN
+
+Oklahoma City(OKC): 26 GP 3 GS 17.2 MIN
+
+**Conclusion based on stats**
+
+Gordon Hayward started 25 games for Charlotte but after being traded to OKC his role diminished sharply to just 17.2 minutes off the bench, suggesting *Lasso* was more correct to discount his value.
+
+**Player name:** Gary Payton II
+
+Analysis (Ridge = 1.463, Lasso = 0)
+
+player (2023-2024) stats link: [https://www.espn.com/nba/player/stats/\_/id/3134903/gary-payton-ii 2023-24 GS: 44 GP 0 GS 15.5 MIN 2024-25 GS: 62 GP 11 GS 15.0 MIN](Gary-payton-ii-stats)
+
+**Conclusion based on stats**
+
+Gary Payton II played a limited bench role in 2023-24 (44 games, 0 starts) but grew into a larger role in 2024-25,
+
+suggesting Ridge detected real but developing value that Lasso missed.
+
+His continued NBA presence across two more seasons confirms he was a real contributor — not just noise that should be zeroed out.
+
+Defensive specialists like Payton are exactly the type of player Ridge captures better than Lasso.
+
+b\. There is a subtle conceptual flaw in how the confidence or credible intervals were calculated in this lab. This is apparent if you paid very close attention during the meetup. Can you tell me what it is?
+
+[**What we did**]{.underline}
+
+Step 1: Used RidgeCV to find optimal alpha → alpha = 2477.08
+
+Step 2: Used that SAME alpha for ALL bootstrap samples
+
+Step 3: Calculated confidence intervals from bootstrap coefficients
+
+[**Flaw**]{.underline}
+
+We fixed alpha = 2477.08 for every bootstrap sample
+
+BUT alpha should be RE-SELECTED for each bootstrap sample separately!
+
+Each bootstrap sample is a different "version" of the data
+
+→ should get its own optimal alpha via cross validation
+
+[**Why this Matters**]{.underline}
+
+*WHAT WE DID:*
+
+Bootstrap sample 1 → fixed alpha 2477.08
+
+Bootstrap sample 2 → fixed alpha 2477.08
+
+Bootstrap sample 3 → fixed alpha 2477.08 ...
+
+→ Underestimates uncertainty in alpha itself
+
+*WHAT WE SHOULD DO:*
+
+Bootstrap sample 1 → RidgeCV → alpha_1
+
+Bootstrap sample 2 → RidgeCV → alpha_2
+
+Bootstrap sample 3 → RidgeCV → alpha_3 ...
+
+→ Captures FULL uncertainty including uncertainty in hyperparameter selection
+
+[**Consequence**]{.underline}
+
+By fixing alpha we assumed: "We are 100% certain 2477.08 is correct"
+
+But alpha itself has uncertainty! Different data samples would select different optimal alphas
+
+**Result:**
+
+Our confidence intervals are TOO NARROW — they underestimate the true uncertainty in RAPM estimates
+
+\*\*\*\*\*\*\*\*\*\*\*---------------------------------------------------------------\*\*\*\*\*\*\*\*
