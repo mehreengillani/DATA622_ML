@@ -1,0 +1,1837 @@
+---
+title: "Lab 5 DATA 622"
+author: "Mehreen Ali Gillani"
+date: "2026-03-29"
+format:
+  html:
+    toc: true
+    toc-depth: 3
+    code-fold: true
+    code-copy: true
+    theme: cosmo
+    embed-resources: true
+    fig-width: 7
+    fig-height: 5
+      
+---
+
+```{python}
+#| echo: false
+import pandas as pd
+import numpy as np
+import matplotlib.pyplot as plt
+import seaborn as sns
+
+# Set global figure parameters at the beginning of your notebook
+plt.rcParams['figure.figsize'] = (7, 5)
+plt.rcParams['figure.dpi'] = 100
+plt.rcParams['savefig.dpi'] = 100
+plt.rcParams['figure.autolayout'] = True  # Automatically adjust layout
+import warnings
+warnings.filterwarnings('ignore')
+
+```
+
+### Overview
+
+You have been given a dataset consisting of a single file, `AmesHousing.csv`, and a data dictionary `data-description.txt`. 
+This dataset contains the sales price of each home as well as other attributes of the home and the
+sales transaction, such as the lot size, the square footage of each floor, when the home was built and remodeled, whether the kitchen is upgraded, etc. A data dictionary has been included with the data. During this lab, you will practice using different types of regression tree methods to predict housing prices in the data.
+
+This dataset is a model dataset for demonstrating machine learning techniques and for prediction. This dataset was downloaded from [kaggle](https://www.kaggle.com/competitions/home-data-for-ml-course/data), which holds periodic introductory competitions using this data, if you ever wanted to try your hand at kaggle competitions
+you could use this assignment to create your first entry. The dataset was 
+originally compiled by De Cook for educational purposes. Skim this article for some tips on using this dataset: [De Cock 2011](https://jse.amstat.org/v19n3/decock.pdf). De Cook makes some suggestions for simplifying the data that you can take if you need to. 
+
+
+The dataset and data dictionary are available here:
+
+- [AmesHousing.csv](https://github.com/georgehagstrom/DATA622Spring2026/blob/main/website/assignments/labs/labData/AmesHousing.csv)
+- [data-description.txt](https://github.com/georgehagstrom/DATA622Spring2026/blob/main/website/assignments/labs/labData/data-description.txt)
+
+
+
+Note: There is a lot of freedom in this exercise in terms of which variables you pick, some of the model choices, and also some hyperparameters. I have an expectation for what the answers will be in general, but you might get different answers depending on what you select and random chance. Report what you find, not what you expect to see (though if you see something unexpected it is a good hint to look for a mistake).
+
+### Problem 1: Building up to a Baseline Model
+
+(a) **Basic EDA and Feature Selection:** Divide the data into an initial training and testing split. Perform a log-transform on the sales price, this will be the target variable. Perform a basic EDA to select features for your model. Report a summary of the EDA and the selection of variables for your model. 
+(Hint: the quality variables are important, and your intuition about what is important in housing is useful for picking). Pick more than 10 variables but less than all 80 (before one-hot encoding).
+Several variables encode the absence of a feature (such as no pool, no garage, etc) as 'NA'. 
+This dataset has almost no real missing data- make sure to encode and interpret 'NA' values appropriately for the variables you select. 
+Make sure ordered categorical features
+have an integer or ordinal encoding, and use one-hot encoding on remaining categorical features.
+
+
+```{python}
+
+from sklearn.model_selection import train_test_split
+
+# Load the data 
+filepath= "https://raw.githubusercontent.com/georgehagstrom/DATA622Spring2026/refs/heads/main/website/assignments/labs/labData/AmesHousing.csv"
+df = pd.read_csv(filepath)
+
+
+# Create train-test split (80-20 split)
+np.random.seed(42)
+
+train_df, test_df = train_test_split(df, test_size=0.2, random_state=42)
+
+print(f"Training set size: {len(train_df)}")
+print(f"Testing set size: {len(test_df)}")
+
+```
+
+#### Log Transform the Target Variable
+```{python}
+#| fig-width: 7
+#| fig-height: 5
+#| out-width: "100%"
+#| fig-asp: 0.6
+# Create log-transformed target variable
+train_df['LogSalePrice'] = np.log(train_df['SalePrice'])
+test_df['LogSalePrice'] = np.log(test_df['SalePrice'])
+
+# Check the distribution before and after
+fig, axes = plt.subplots(1, 2, figsize=(7, 5))
+
+# Original SalePrice distribution
+axes[0].hist(train_df['SalePrice'], bins=50, edgecolor='black')
+axes[0].set_title('Original SalePrice Distribution')
+axes[0].set_xlabel('SalePrice')
+axes[0].set_ylabel('Frequency')
+
+# Log-transformed distribution
+axes[1].hist(train_df['LogSalePrice'], bins=50, edgecolor='black')
+axes[1].set_title('Log-Transformed SalePrice Distribution')
+axes[1].set_xlabel('Log(SalePrice)')
+axes[1].set_ylabel('Frequency')
+
+plt.tight_layout()
+plt.show()
+```
+
+#### Basic EDA - Correlation with Target
+```{python}
+# Select numeric columns
+numeric_cols = train_df.select_dtypes(include=[np.number]).columns.tolist()
+
+# Calculate correlations with LogSalePrice
+correlations = train_df[numeric_cols].corr()['LogSalePrice'].sort_values(ascending=False)
+
+# Display top 20 correlations
+print("Top 20 features correlated with LogSalePrice:")
+print(correlations.head(20))
+```
+
+```{python}
+from sklearn.feature_selection import f_regression
+from sklearn.preprocessing import LabelEncoder
+
+print("Analyzing Categorical Features with LogSalePrice:")
+print("="*60)
+
+# Identify categorical features (object type)
+categorical_cols = train_df.select_dtypes(include=['object']).columns.tolist()
+
+# Also include MS SubClass which is numeric but actually categorical
+categorical_cols.append('MS SubClass')
+
+print(f"Total categorical features to analyze: {len(categorical_cols)}")
+
+# Store results
+categorical_correlations = []
+
+for col in categorical_cols:
+    if col in train_df.columns:
+        # For features with many unique values, use encoding
+        if train_df[col].nunique() > 30:  # Neighborhood has 28, so this threshold works
+            # For high cardinality, use target encoding or skip for initial analysis
+            print(f"\n{col}: {train_df[col].nunique()} unique values - high cardinality")
+            
+            # Quick check using group means
+            grouped_means = train_df.groupby(col)['LogSalePrice'].mean()
+            # Calculate variance ratio (like F-statistic approximation)
+            overall_mean = train_df['LogSalePrice'].mean()
+            between_var = grouped_means.var()
+            within_var = train_df.groupby(col)['LogSalePrice'].var().mean()
+            if within_var > 0:
+                f_stat = between_var / within_var
+                categorical_correlations.append({
+                    'feature': col,
+                    'f_statistic': f_stat,
+                    'unique_values': train_df[col].nunique()
+                })
+                print(f"  F-statistic approximation: {f_stat:.4f}")
+        else:
+            # For low cardinality, use ANOVA
+            # Prepare groups
+            groups = []
+            for category in train_df[col].unique():
+                groups.append(train_df[train_df[col] == category]['LogSalePrice'].values)
+            
+            # Perform ANOVA
+            from scipy.stats import f_oneway
+            f_stat, p_value = f_oneway(*groups)
+            
+            categorical_correlations.append({
+                'feature': col,
+                'f_statistic': f_stat,
+                'p_value': p_value,
+                'unique_values': train_df[col].nunique()
+            })
+            print(f"{col:20} | F-statistic: {f_stat:.4f} | p-value: {p_value:.4e} | n={train_df[col].nunique()}")
+
+# Sort by F-statistic (higher = more important)
+categorical_importance = pd.DataFrame(categorical_correlations).sort_values('f_statistic', ascending=False)
+
+print("\n" + "="*60)
+print("Top Categorical Features (by F-statistic):")
+print("="*60)
+print(categorical_importance.head(15).to_string(index=False))
+
+```
+
+Beyond numeric correlations, ANOVA F-statistics revealed that categorical features like Exter Qual (F=627), Kitchen Qual (F=583), and Central Air (F=393) have even stronger relationships with sale price than most numeric features. This confirms the importance of quality ratings and amenities in housing valuation. Neighborhood (F=111) also shows significant variation, with some neighborhoods commanding over 30% higher prices than others. MS SubClass (F=45) is also significant, indicating that building type matters. These insights will guide our feature selection and encoding strategies for modeling.
+
+
+#### Feature Selection 
+
+```{python}
+#| fig-width: 7
+#| fig-height: 5
+#| out-width: "100%"
+#| fig-asp: 0.6
+#   selected features based on correlation analysis AND F-statistics
+selected_features = [
+    # Strongest numeric correlated features (from Step 3 output)
+    'Overall Qual',      # 0.818 correlation - strongest numeric predictor
+    'Gr Liv Area',       # 0.683 - above ground living area
+    'Garage Area',       # 0.637 - garage size
+    'Total Bsmt SF',     # 0.606 - basement area (0 = no basement)
+    'Year Built',        # 0.598 - original construction
+    '1st Flr SF',        # 0.588 - first floor size
+    'Year Remod/Add',    # 0.567 - remodel year
+    
+    # Top categorical features by F-statistic (from ANOVA analysis)
+    'Exter Qual',        # F=627 - EXTERIOR QUALITY (strongest categorical)
+    'Kitchen Qual',      # F=583 - KITCHEN QUALITY (2nd strongest)
+    'Central Air',       # F=393 - CENTRAL AIR (binary but huge impact)
+    'Foundation',        # F=210 - FOUNDATION TYPE (structural importance)
+    'Paved Drive',       # F=190 - PAVED DRIVEWAY (amenity indicator)
+    'Heating QC',        # F=188 - HEATING QUALITY (comfort indicator)
+    'Neighborhood',      # F=111 - LOCATION (critical for housing)
+    'MS Zoning',         # F=93 - ZONING CLASSIFICATION (land use)
+    'Sale Condition',    # F=66 - TRANSACTION TYPE (sale conditions)
+    
+    # Original quality features (already covered by above)
+    'Bsmt Qual',         # Basement quality (NA = no basement) - F-statistic nan but important
+    
+    # Amenities (numeric)
+    'Fireplaces',        # 0.479 correlation - number of fireplaces
+    'Wood Deck SF',      # 0.334 - deck area
+    
+    # Additional meaningful features
+    'Lot Area',          # Lot size - 0.221 correlation
+    'MS SubClass'        # Building class - F=72 (categorical)
+]
+
+print(f"Selected feature set: {len(selected_features)} features")
+print("="*70)
+
+# Create a DataFrame to show feature importance from both methods
+feature_summary = []
+
+for feature in selected_features:
+    if feature in correlations.index:
+        pearson_r = correlations[feature]
+        pearson_source = "numeric"
+    else:
+        pearson_r = None
+        pearson_source = "categorical"
+    
+    # Add F-statistic if available from our analysis
+    if 'categorical_importance' in locals():
+        fstat_row = categorical_importance[categorical_importance['feature'] == feature]
+        if len(fstat_row) > 0:
+            f_stat = fstat_row['f_statistic'].values[0]
+        else:
+            f_stat = None
+    else:
+        f_stat = None
+    
+    feature_summary.append({
+        'feature': feature,
+        'pearson_r': pearson_r,
+        'f_statistic': f_stat,
+        'type': 'numeric' if feature in correlations.index else 'categorical'
+    })
+
+summary_df = pd.DataFrame(feature_summary)
+
+print("\nFeature Selection Summary:")
+print("-"*70)
+print(f"{'Feature':<18} {'Type':<12} {'Pearson r':<12} {'F-statistic':<12}")
+print("-"*70)
+
+for _, row in summary_df.iterrows():
+    pearson_str = f"{row['pearson_r']:.3f}" if row['pearson_r'] is not None else "-"
+    fstat_str = f"{row['f_statistic']:.0f}" if row['f_statistic'] is not None and not pd.isna(row['f_statistic']) else "-"
+    print(f"{row['feature']:<18} {row['type']:<12} {pearson_str:<12} {fstat_str:<12}")
+
+# Check for any missing values in new features
+print("\n" + "="*70)
+print("Missing Value Check for New Features:")
+print("="*70)
+
+new_features = ['Central Air', 'Foundation', 'Paved Drive', 'Heating QC', 'MS Zoning', 'Sale Condition']
+for feature in new_features:
+    if feature in train_df.columns:
+        na_count = train_df[feature].isna().sum()
+        print(f"{feature:15} - {na_count} NA values ({na_count/len(train_df)*100:.1f}%)")
+    else:
+        print(f"{feature:15} - NOT FOUND in dataset")
+
+# Visualize the importance of new categorical features
+fig, axes = plt.subplots(2, 3, figsize=(7, 5))
+axes = axes.flatten()
+
+new_cat_features = ['Central Air', 'Foundation', 'Paved Drive', 'Heating QC', 'MS Zoning', 'Sale Condition']
+
+for idx, feature in enumerate(new_cat_features):
+    ax = axes[idx]
+    
+    # Calculate means
+    means = train_df.groupby(feature)['LogSalePrice'].mean().sort_values(ascending=False)
+    
+    # Create bar plot
+    bars = ax.bar(range(len(means)), means.values, color='darkorange', alpha=0.7)
+    ax.set_xticks(range(len(means)))
+    ax.set_xticklabels(means.index, rotation=45, ha='right', fontsize=9)
+    ax.set_ylabel('Mean Log(SalePrice)')
+    
+    # Add F-statistic if available
+    fstat_row = categorical_importance[categorical_importance['feature'] == feature]
+    if len(fstat_row) > 0:
+        f_val = fstat_row['f_statistic'].values[0]
+        title = f"{feature}\n(F-statistic: {f_val:.0f})"
+    else:
+        title = feature
+    ax.set_title(title, fontsize=10)
+    ax.grid(True, alpha=0.3, axis='y')
+
+plt.tight_layout()
+plt.show()
+```
+#### Check NA's
+```{python}
+# Create a copy with selected features plus target
+train_selected = train_df[selected_features + ['LogSalePrice']].copy()
+test_selected = test_df[selected_features + ['LogSalePrice']].copy()
+
+# Check for NA values in selected features
+print("NA Counts in Training Set:")
+print("-" * 40)
+na_counts = train_selected[selected_features].isna().sum()
+print(na_counts[na_counts > 0])
+
+```
+
+
+#### Handle NA's
+
+```{python}
+# Handle only your selected features
+selected_features_to_handle = {
+    'Bsmt Qual': 'None',      # Categorical - no basement
+    'Garage Area': 0,          # Numeric - no garage  
+    'Total Bsmt SF': 0         # Numeric - no basement
+}
+
+for feature, fill_value in selected_features_to_handle.items():
+    train_selected[feature] = train_selected[feature].fillna(fill_value)
+    test_selected[feature] = test_selected[feature].fillna(fill_value)
+    print(f"{feature} -> filled with: {fill_value}")
+
+```
+
+#### ordinal encoding
+```{python}
+# Define ordinal mapping based on the order we saw in Step 4
+# Quality order: Ex (Excellent) > Gd (Good) > TA (Typical) > Fa (Fair) > Po (Poor) > None (No feature)
+quality_mapping = {
+    'Ex': 5,   # Excellent
+    'Gd': 4,   # Good  
+    'TA': 3,   # Typical/Average
+    'Fa': 2,   # Fair
+    'Po': 1,   # Poor
+    'None': 0  # No feature (for basement)
+}
+
+# ordinal features to encode based on F-statistic analysis and domain knowledge
+ordinal_features = [
+    'Exter Qual',      # Exterior quality
+    'Bsmt Qual',       # Basement quality  
+    'Kitchen Qual',    # Kitchen quality
+    'Heating QC',      # Heating quality (NEW - from F-statistic analysis)
+    'Paved Drive',     # Paved driveway (Y, P, N - has natural order)
+    'Central Air'      # Central air (Y, N - binary but ordinal)
+]
+
+# Define mapping for Paved Drive (Y > P > N)
+paved_drive_mapping = {
+    'Y': 2,   # Paved
+    'P': 1,   # Partial
+    'N': 0    # Not paved
+}
+
+# Define mapping for Central Air
+central_air_mapping = {
+    'Y': 1,   # Has central air
+    'N': 0    # No central air
+}
+
+print("Ordinal Feature Encoding:")
+print("-" * 40)
+
+for feature in ordinal_features:
+    if feature in train_df.columns:
+        # Choose appropriate mapping
+        if feature == 'Paved Drive':
+            mapping = paved_drive_mapping
+        elif feature == 'Central Air':
+            mapping = central_air_mapping
+        else:
+            mapping = quality_mapping
+        
+        # Create encoded column
+        train_selected[f'{feature}_encoded'] = train_selected[feature].map(mapping)
+        test_selected[f'{feature}_encoded'] = test_selected[feature].map(mapping)
+        
+        print(f"\n{feature}:")
+        unique_values = sorted([str(x) for x in train_selected[feature].unique()])
+        encoded_values = sorted(train_selected[f'{feature}_encoded'].unique())
+
+        print(f"  Unique values in training: {unique_values}")
+        print(f"  Encoded values: {encoded_values}")
+        
+        # Drop original categorical column
+        train_selected.drop(feature, axis=1, inplace=True)
+        test_selected.drop(feature, axis=1, inplace=True)
+    else:
+        print(f"\n{feature}: Not found in dataset")
+```        
+
+#### One hot encoding for nominal features
+```{python}
+from sklearn.preprocessing import OneHotEncoder
+
+# Update nominal features to include new ones from your enhanced selection
+nominal_features = ['Neighborhood', 'MS SubClass', 'Foundation', 'MS Zoning', 'Sale Condition']
+
+print("Nominal Feature Analysis:")
+print("-" * 40)
+
+# Check the number of unique values in each
+for feature in nominal_features:
+    if feature in train_selected.columns:
+        n_unique = train_selected[feature].nunique()
+        print(f"{feature}: {n_unique} unique values")
+        
+        # Show sample values for context
+        sample_vals = sorted([str(x) for x in train_selected[feature].unique()])[:5]
+        print(f"  Sample values: {sample_vals}")
+
+# Apply one-hot encoding
+print("\nApplying One-Hot Encoding:")
+print("-" * 40)
+
+# Use pandas get_dummies for simplicity
+train_encoded = pd.get_dummies(train_selected, columns=nominal_features, prefix=nominal_features)
+test_encoded = pd.get_dummies(test_selected, columns=nominal_features, prefix=nominal_features)
+
+# Ensure test set has same columns as training set
+missing_cols = set(train_encoded.columns) - set(test_encoded.columns)
+for col in missing_cols:
+    if col != 'LogSalePrice':  # Don't add target column
+        test_encoded[col] = 0
+
+# Ensure columns are in same order
+test_encoded = test_encoded[train_encoded.columns]
+
+print(f"Original feature count (before encoding): {len(train_selected.columns)}")
+print(f"After one-hot encoding: {len(train_encoded.columns)}")
+
+# Show breakdown of encoded columns
+for feature in nominal_features:
+    if feature in train_selected.columns:
+        n_unique = train_selected[feature].nunique()
+        print(f"  - {feature} encoded into {n_unique} binary columns")
+
+# Verify no missing values remain
+print("\nFinal verification - any missing values?")
+print(f"Training set: {train_encoded.isnull().sum().sum()} missing values")
+print(f"Test set: {test_encoded.isnull().sum().sum()} missing values")
+
+# Show the final feature set
+print("\nFinal Feature Set (first 20 columns):")
+print(train_encoded.columns[:20].tolist())
+print(f"... and {len(train_encoded.columns)-20} more columns")
+
+# Display target variable column
+print(f"\nTarget column: 'LogSalePrice' is present: {'LogSalePrice' in train_encoded.columns}")
+```
+
+**Before encoding: 22 features**
+
+10 numeric features (Overall Qual, Gr Liv Area, Garage Area, etc.)
+
+7 ordinal features (Exter Qual, Bsmt Qual, Kitchen Qual, Heating QC, Paved Drive, Central Air, etc.)
+
+5 nominal features (Neighborhood, MS SubClass, Foundation, MS Zoning, Sale Condition)
+
+1 target variable (LogSalePrice)
+
+**After encoding: 80 features**
+
+All numeric and ordinal features remain as-is
+
+28 Neighborhood dummy variables
+
+16 MS SubClass dummy variables
+
+6 Foundation dummy variables
+
+7 MS Zoning dummy variables
+
+6 Sale Condition dummy variables
+
+Data Quality: No missing values in train or test sets
+
+
+(b) **Baseline Model:** Use ridge regression with cross-validation to fit a baseline model. Evaluate it on the test set. What is the mean squared error and what are the most important
+features in your linear model?
+
+```{python}
+
+from sklearn.linear_model import Ridge
+from sklearn.model_selection import GridSearchCV
+from sklearn.preprocessing import StandardScaler
+from sklearn.pipeline import Pipeline
+from sklearn.metrics import mean_squared_error, mean_absolute_error, r2_score
+
+warnings.filterwarnings('ignore', category=RuntimeWarning)
+# Separate features and target
+X_train = train_encoded.drop('LogSalePrice', axis=1)
+y_train = train_encoded['LogSalePrice']
+X_test = test_encoded.drop('LogSalePrice', axis=1)
+y_test = test_encoded['LogSalePrice']
+
+# Create pipeline with scaling (important for Ridge)
+ridge_pipeline = Pipeline([
+    ('scaler', StandardScaler()),
+    ('ridge', Ridge(random_state=42))
+])
+
+# Define alpha values to test
+param_grid = {'ridge__alpha': [0.001, 0.01, 0.1, 1, 10, 50, 100, 500, 1000]}
+
+# Perform grid search with 5-fold cross-validation
+ridge_grid = GridSearchCV(
+    ridge_pipeline,
+    param_grid,
+    cv=5,
+    scoring='neg_mean_squared_error',
+    n_jobs=-1,
+    verbose=1
+)
+
+print("Performing Ridge Regression with 5-fold Cross-Validation...")
+ridge_grid.fit(X_train, y_train)
+
+# Get best model
+best_ridge = ridge_grid.best_estimator_
+best_alpha = ridge_grid.best_params_['ridge__alpha']
+
+print(f"\nBest alpha from cross-validation: {best_alpha}")
+
+# Make predictions
+y_train_pred = best_ridge.predict(X_train)
+y_test_pred = best_ridge.predict(X_test)
+
+# Evaluate the model
+print("\n" + "="*60)
+print("Ridge Regression Model Performance (with CV):")
+print("="*60)
+print(f"Training Set:")
+print(f"  RMSE: {np.sqrt(mean_squared_error(y_train, y_train_pred)):.4f}")
+print(f"  MAE: {mean_absolute_error(y_train, y_train_pred):.4f}")
+print(f"  R²: {r2_score(y_train, y_train_pred):.4f}")
+
+print(f"\nTest Set:")
+print(f"  RMSE: {np.sqrt(mean_squared_error(y_test, y_test_pred)):.4f}")
+print(f"  MAE: {mean_absolute_error(y_test, y_test_pred):.4f}")
+print(f"  R²: {r2_score(y_test, y_test_pred):.4f}")
+
+# Convert predictions back to original scale
+y_test_pred_original = np.exp(y_test_pred)
+y_test_original = np.exp(y_test)
+
+print(f"\nOriginal Scale (SalePrice) Performance:")
+print(f"Test Set RMSE: ${np.sqrt(mean_squared_error(y_test_original, y_test_pred_original)):,.0f}")
+print(f"Test Set MAE: ${mean_absolute_error(y_test_original, y_test_pred_original):,.0f}")
+
+# Get coefficients (need to extract from pipeline)
+# The scaler transforms features, so we need to get coefficients properly
+ridge_model = best_ridge.named_steps['ridge']
+scaler = best_ridge.named_steps['scaler']
+
+# For interpretability, get coefficients on original scale
+coefficients = ridge_model.coef_
+
+# Show top 10 most important features
+feature_importance = pd.DataFrame({
+    'feature': X_train.columns,
+    'coefficient': coefficients
+}).sort_values('coefficient', key=abs, ascending=False)
+
+print(f"\nTop 10 Most Important Features (by absolute coefficient):")
+print(feature_importance.head(10).to_string(index=False))
+
+```
+
+**Baseline Model Performance Analysis:**
+
+Key Metrics:
+Training R²: 0.8832 - Model explains 88.3% of variance in training data
+
+Test R²: 0.9099 - Model explains 90.99% of variance in test data
+
+Test RMSE (log scale): 0.1291 - Strong predictive accuracy
+
+Test RMSE (original scale): $31,867 - Average prediction error of ~$31.9K
+
+Test MAE (original scale): $17,208 - Half of predictions are within ~$17.2K of actual price
+
+Model Characteristics:
+Test R² > Training R² (0.9099 > 0.8832) indicates excellent generalization with no overfitting
+
+The model effectively captures the underlying patterns in housing prices
+
+Ridge regularization with alpha=100 provides optimal shrinkage, reducing coefficient variance while maintaining predictive power
+
+Top Important Features:
+Gr Liv Area emerged as the most important feature (coefficient: 0.0877)
+
+Additional top features (from your output) include zoning classifications, neighborhood indicators, and quality ratings
+
+The regularization helped stabilize coefficients, making the model more robust
+
+
+### Problem 2: Decision Trees and Random Forests
+
+(a) **Simple Decision Tree:** Fit a regression tree to the training set. Plot the tree, and inter-
+pret the results. What test MSE do you obtain?
+
+```{python}
+from sklearn.tree import DecisionTreeRegressor, plot_tree
+
+# Use the same feature set from Problem 1
+X_train = train_encoded.drop('LogSalePrice', axis=1)
+y_train = train_encoded['LogSalePrice']
+X_test = test_encoded.drop('LogSalePrice', axis=1)
+y_test = test_encoded['LogSalePrice']
+
+
+# Fit a simple decision tree (without pruning first)
+tree_simple = DecisionTreeRegressor(random_state=42)
+tree_simple.fit(X_train, y_train)
+
+# Make predictions
+y_train_pred_tree = tree_simple.predict(X_train)
+y_test_pred_tree = tree_simple.predict(X_test)
+
+# Calculate MSE
+from sklearn.metrics import mean_squared_error
+train_mse_tree = mean_squared_error(y_train, y_train_pred_tree)
+test_mse_tree = mean_squared_error(y_test, y_test_pred_tree)
+
+print("Simple Decision Tree (No Pruning):")
+print("="*50)
+print(f"Training MSE: {train_mse_tree:.6f}")
+print(f"Training RMSE: {np.sqrt(train_mse_tree):.4f}")
+print(f"Test MSE: {test_mse_tree:.6f}")
+print(f"Test RMSE: {np.sqrt(test_mse_tree):.4f}")
+
+# Add these metrics to your analysis
+print(f"\nTree Structure:")
+print(f"  Tree Depth: {tree_simple.get_depth()}")
+print(f"  Number of Leaves: {tree_simple.get_n_leaves()}")
+print(f"  Total Nodes: {tree_simple.tree_.node_count}") 
+
+# Convert to original scale for interpretation
+y_test_pred_original = np.exp(y_test_pred_tree)
+y_test_original = np.exp(y_test)
+test_rmse_original = np.sqrt(mean_squared_error(y_test_original, y_test_pred_original))
+
+print(f"\nTest MSE (original scale): ${test_mse_tree:.0f} (log scale)")
+print(f"Test RMSE (original scale): ${test_rmse_original:,.0f}")
+
+# Check for overfitting
+print(f"\nOverfitting Check:")
+print(f"Training R²: {tree_simple.score(X_train, y_train):.4f}")
+print(f"Test R²: {tree_simple.score(X_test, y_test):.4f}")
+print(f"Difference: {tree_simple.score(X_train, y_train) - tree_simple.score(X_test, y_test):.4f}")
+
+```
+
+
+**Simple Decision Tree (No Pruning):**
+
+-   Training R² = 1.000 - Perfect fit, tree has memorized all training data
+
+-   Test R² = 0.816 - Significantly lower, indicating poor generalization
+
+-   Tree Depth: 28 - Extremely deep tree with 2,287 leaves (almost one per training sample)
+
+-   Test RMSE: $34,785 - Average prediction error of ~$34.8K
+
+**Comparison with Ridge Regression:**
+
+-   Ridge Regression Test R²: 0.910 - Outperforms the simple tree by 9.4%
+
+-   Ridge Test RMSE: $31,867 - $2,918 lower error than the unpruned tree
+
+The unpruned decision tree severely overfits (training R² = 1.000 vs test R² = 0.816), while Ridge generalizes well with no signs of overfitting (test R² > training R²)
+
+(b) **Tree Pruning:** Use cross-validation in order to determine the optimal level of
+tree complexity. Does pruning the tree improve the test MSE?
+
+```{python}
+#| fig-width: 7
+#| fig-height: 5
+#| out-width: "100%"
+
+
+from sklearn.model_selection import cross_val_score, GridSearchCV
+
+# Try different max_depth values to find optimal tree complexity
+print("Tree Pruning with Cross-Validation:")
+print("="*50)
+
+# Define parameter grid for pruning
+param_grid = {
+    'max_depth': [3, 4, 5, 6, 7, 8, 9, 10, 12, 15, 20],
+    'min_samples_split': [2, 5, 10, 20],
+    'min_samples_leaf': [1, 5, 10, 20]
+}
+
+# Initialize decision tree
+tree_cv = DecisionTreeRegressor(random_state=42)
+
+# Perform grid search with 5-fold cross-validation
+grid_search = GridSearchCV(
+    tree_cv, 
+    param_grid, 
+    cv=5, 
+    scoring='neg_mean_squared_error',
+    n_jobs=-1,
+    verbose=1
+)
+
+grid_search.fit(X_train, y_train)
+
+# Get best parameters
+print(f"\nBest Parameters from Cross-Validation:")
+print(f"max_depth: {grid_search.best_params_['max_depth']}")
+print(f"min_samples_split: {grid_search.best_params_['min_samples_split']}")
+print(f"min_samples_leaf: {grid_search.best_params_['min_samples_leaf']}")
+
+# Best model
+best_tree = grid_search.best_estimator_
+
+# Evaluate on test set
+y_train_pred_best = best_tree.predict(X_train)
+y_test_pred_best = best_tree.predict(X_test)
+
+train_mse_best = mean_squared_error(y_train, y_train_pred_best)
+test_mse_best = mean_squared_error(y_test, y_test_pred_best)
+
+print(f"\nPruned Tree Performance:")
+print(f"Training MSE: {train_mse_best:.6f}")
+print(f"Training RMSE: {np.sqrt(train_mse_best):.4f}")
+print(f"Test MSE: {test_mse_best:.6f}")
+print(f"Test RMSE: {np.sqrt(test_mse_best):.4f}")
+print(f"Test R²: {best_tree.score(X_test, y_test):.4f}")
+
+# Compare with unpruned tree
+print(f"\nComparison with Unpruned Tree:")
+print(f"Unpruned Test MSE: {test_mse_tree:.6f}")
+print(f"Pruned Test MSE: {test_mse_best:.6f}")
+print(f"Improvement: {(test_mse_tree - test_mse_best)/test_mse_tree*100:.2f}%")
+
+# Check overfitting reduction
+print(f"\nOverfitting Reduction:")
+print(f"Unpruned Train-Test R² gap: {1.0000 - 0.8216:.4f}")
+print(f"Pruned Train-Test R² gap: {best_tree.score(X_train, y_train) - best_tree.score(X_test, y_test):.4f}")
+
+# Visualize the pruned tree
+plt.figure(figsize=(10, 8))
+plot_tree(best_tree, 
+          feature_names=X_train.columns.tolist(),
+          filled=True, 
+          rounded=True,
+          max_depth=4,
+          fontsize=8)
+plt.title(f"Pruned Decision Tree (max_depth={grid_search.best_params_['max_depth']})", fontsize=12)
+plt.tight_layout()
+plt.show()
+
+# Feature importance for pruned tree
+feature_importance_pruned = pd.DataFrame({
+    'feature': X_train.columns,
+    'importance': best_tree.feature_importances_
+}).sort_values('importance', ascending=False)
+
+print("\nTop 10 Most Important Features (Pruned Tree):")
+print(feature_importance_pruned.head(10).to_string(index=False))
+
+# Cross-validation results visualization
+results_df = pd.DataFrame(grid_search.cv_results_)
+pruning_results = results_df.groupby('param_max_depth')['mean_test_score'].mean()
+pruning_results = -pruning_results  # Convert back to positive MSE
+
+plt.figure(figsize=(7, 5))
+plt.plot(pruning_results.index, pruning_results.values, 'bo-')
+plt.xlabel('Max Depth')
+plt.ylabel('Cross-Validation MSE')
+plt.title('Cross-Validation MSE vs Tree Depth')
+plt.grid(True, alpha=0.3)
+plt.tight_layout()
+plt.show()
+
+print(f"\nOptimal tree depth: {grid_search.best_params_['max_depth']} (lowest CV MSE)")
+```
+
+**Analysis:**
+
+ Pruning significantly improved the decision tree model. Test MSE decreased by 20.36%, and the train-test R² gap narrowed from 0.1784 to 0.0427, indicating much better generalization. The optimal tree (max_depth=20, min_samples_leaf=10) balances complexity with predictive power, with Overall Qual remaining the most important feature.
+
+(c) **Random Forests:** Use random forest to model this data. Use 'GridSearchCV' and at least 5-fold cross-validation to find the optimal value of 'max_features'. Plot the predicted test error using the 'cv_results_[\'mean_test_score\']' of your cross-validated model, and describe the effect of 'max_features' on the error rate. Where does the optimal value fall in comparison to $\sqrt{p}$ and $p/3$? What test MSE do you obtain? Use the 'feature_importance_' values to determine which variables are most important. 
+
+```{python}
+#| fig-width: 7
+#| fig-height: 5
+#| out-width: "100%"
+
+
+from sklearn.ensemble import RandomForestRegressor
+print("Random Forest - Tuning max_features:")
+print("="*60)
+
+# Get number of features
+p = X_train.shape[1]
+print(f"Number of features (p): {p}")
+print(f"√p: {np.sqrt(p):.2f}")
+print(f"p/3: {p/3:.2f}")
+
+# Define parameter grid focusing on max_features
+param_grid = {
+    'max_features': [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 12, 15, 20, 25, 30, 40, 50, 58]
+}
+
+# Initialize random forest with reasonable defaults
+rf = RandomForestRegressor(
+    n_estimators=100,
+    random_state=42,
+    n_jobs=-1
+)
+
+# Perform grid search with 5-fold cross-validation
+rf_grid = GridSearchCV(
+    rf,
+    param_grid,
+    cv=5,
+    scoring='neg_mean_squared_error',
+    n_jobs=-1,
+    verbose=1
+)
+
+rf_grid.fit(X_train, y_train)
+
+# Extract cross-validation results
+cv_results = pd.DataFrame(rf_grid.cv_results_)
+max_features_values = cv_results['param_max_features'].astype(int)
+mean_test_scores = -cv_results['mean_test_score']  # Convert back to positive MSE
+std_test_scores = cv_results['std_test_score']
+
+# Plot the effect of max_features on test error
+plt.figure(figsize=(7, 5))
+plt.errorbar(max_features_values, mean_test_scores, yerr=std_test_scores, 
+             fmt='o-', capsize=5, capthick=2, markersize=8, linewidth=2)
+plt.axvline(x=np.sqrt(p), color='red', linestyle='--', label=f'√p = {np.sqrt(p):.2f}', alpha=0.7)
+plt.axvline(x=p/3, color='green', linestyle='--', label=f'p/3 = {p/3:.2f}', alpha=0.7)
+plt.axvline(x=rf_grid.best_params_['max_features'], color='blue', linestyle=':', 
+            linewidth=3, label=f'Optimal = {rf_grid.best_params_["max_features"]}')
+plt.xlabel('max_features', fontsize=12)
+plt.ylabel('Cross-Validation MSE', fontsize=12)
+plt.title('Effect of max_features on Random Forest Test Error (5-fold CV)', fontsize=12)
+plt.legend()
+plt.grid(True, alpha=0.3)
+plt.tight_layout()
+plt.show()
+
+# Print results
+print("\n" + "="*60)
+print("max_features Tuning Results:")
+print("="*60)
+print(f"Optimal max_features: {rf_grid.best_params_['max_features']}")
+print(f"√p: {np.sqrt(p):.2f}")
+print(f"p/3: {p/3:.2f}")
+print(f"\nComparison:")
+if rf_grid.best_params_['max_features'] < np.sqrt(p):
+    print(f"Optimal ({rf_grid.best_params_['max_features']}) < √p ({np.sqrt(p):.2f})")
+elif rf_grid.best_params_['max_features'] > np.sqrt(p):
+    print(f"Optimal ({rf_grid.best_params_['max_features']}) > √p ({np.sqrt(p):.2f})")
+else:
+    print(f"Optimal equals √p")
+
+if rf_grid.best_params_['max_features'] < p/3:
+    print(f"Optimal ({rf_grid.best_params_['max_features']}) < p/3 ({p/3:.2f})")
+elif rf_grid.best_params_['max_features'] > p/3:
+    print(f"Optimal ({rf_grid.best_params_['max_features']}) > p/3 ({p/3:.2f})")
+else:
+    print(f"Optimal equals p/3")
+
+# Get best model and evaluate on test set
+best_rf = rf_grid.best_estimator_
+y_test_pred = best_rf.predict(X_test)
+test_mse = mean_squared_error(y_test, y_test_pred)
+test_rmse = np.sqrt(test_mse)
+
+print(f"\nTest Performance with Optimal max_features:")
+print(f"Test MSE: {test_mse:.6f}")
+print(f"Test RMSE: {test_rmse:.4f}")
+print(f"Test R²: {best_rf.score(X_test, y_test):.4f}")
+
+# Convert to original scale
+y_test_original = np.exp(y_test)
+y_test_pred_original = np.exp(y_test_pred)
+test_rmse_original = np.sqrt(mean_squared_error(y_test_original, y_test_pred_original))
+
+print(f"\nOriginal Scale (SalePrice):")
+print(f"Test RMSE: ${test_rmse_original:,.0f}")
+print(f"Test MAE: ${mean_absolute_error(y_test_original, y_test_pred_original):,.0f}")
+
+# Feature importance analysis
+feature_importance = pd.DataFrame({
+    'feature': X_train.columns,
+    'importance': best_rf.feature_importances_
+}).sort_values('importance', ascending=False)
+
+print("\n" + "="*60)
+print("Top 15 Most Important Features (Random Forest):")
+print("="*60)
+print(feature_importance.head(15).to_string(index=False))
+
+# Plot feature importance
+plt.figure(figsize=(7, 5))
+top_features = feature_importance.head(20)
+plt.barh(range(len(top_features)), top_features['importance'].values)
+plt.yticks(range(len(top_features)), top_features['feature'].values)
+plt.xlabel('Feature Importance', fontsize=12)
+plt.title(f'Random Forest: Top 20 Feature Importances (max_features={best_rf.max_features})', fontsize=12)
+plt.gca().invert_yaxis()
+plt.tight_layout()
+plt.show()
+
+```
+
+**Random Forest Results Analysis:**
+1. Random Forest outperforms all models: 
+Test R² = 0.9169, Test RMSE = 26,964 (best performance)
+
+2. Top Features (Random Forest):
+
+Overall Qual (0.245) - Dominant predictor
+
+Gr Liv Area (0.147) - Living space
+
+Exter Qual_encoded (0.105) - Exterior quality (3rd most important)
+
+Year Built (0.091) - Construction year
+
+Bsmt Qual_encoded (0.062) - Basement quality
+
+3. Why Random Forest Performs Best:
+
+Captures non-linear relationships (e.g., diminishing returns on size)
+
+Handles interactions between features naturally
+
+Ensemble of trees reduces variance while maintaining low bias
+
+Optimal max_features=30 balances feature diversity at each split
+
+4. Comparison with Ridge Regression:
+
+Random Forest's ability to model non-linear patterns gives it an edge
+
+Ridge assumes linear relationships with regularization
+
+
+(d) **Comparing Ridge Regression and Random Forests:** Compare the two models in the following two ways. First, did ridge regression have a lower or higher test error than your Random Forest model (I expect Random Forest to outperform, but with good feature engineering the two should be comparable on this dataset)? 
+Next, make a 'partial dependence' plot of how the ridge regression model and the random forest model predict the relationship between housing size and sales price (I hope that you have included some of the living area features
+in your models...). I recommend 'GrLivArea'. Create a grid of 'GrLivArea' values between 0 and 15000. Next, loop through each value of 'GrLivArea' in the grid, 
+and clone the training set at each step of the loop. In the cloned training set, replace the real value of 'GrLivArea' with the grid value, and predict the log sales price on all the cloned data. Then compute the average of the 
+predicted log sales price for each value of the 'GrLivArea'. Make a plot of the mean predicted log sales price versus 'GrLivArea' for both Random Forest and Ridge Regression. Explain what you observe. Note: Being aware of this phenomenon is crucial for properly using tree based methods.
+
+#### Ridge regression model on our dataset
+```{python}
+from sklearn.linear_model import Ridge
+from sklearn.preprocessing import StandardScaler
+from sklearn.pipeline import Pipeline
+
+# Train Ridge Regression (with cross-validation for alpha)
+print("Training Ridge Regression Model:")
+print("="*50)
+
+# Create pipeline with scaling (important for Ridge)
+ridge_pipeline = Pipeline([
+    ('scaler', StandardScaler()),
+    ('ridge', Ridge(random_state=42))
+])
+
+# Find optimal alpha with cross-validation
+param_grid_ridge = {'ridge__alpha': [0.001, 0.01, 0.1, 1, 10, 100, 1000]}
+ridge_grid = GridSearchCV(ridge_pipeline, param_grid_ridge, cv=5, scoring='neg_mean_squared_error', n_jobs=-1)
+ridge_grid.fit(X_train, y_train)
+
+best_ridge = ridge_grid.best_estimator_
+print(f"Optimal alpha: {ridge_grid.best_params_['ridge__alpha']}")
+
+# Evaluate Ridge
+y_test_pred_ridge = best_ridge.predict(X_test)
+test_mse_ridge = mean_squared_error(y_test, y_test_pred_ridge)
+test_rmse_ridge = np.sqrt(test_mse_ridge)
+test_r2_ridge = best_ridge.score(X_test, y_test)
+
+print(f"\nRidge Regression Performance:")
+print(f"Test MSE: {test_mse_ridge:.6f}")
+print(f"Test RMSE: {test_rmse_ridge:.4f}")
+print(f"Test R²: {test_r2_ridge:.4f}")
+
+# Compare with Random Forest
+print(f"\nComparison:")
+print(f"Random Forest Test MSE: {test_mse:.6f}")
+print(f"Ridge Test MSE: {test_mse_ridge:.6f}")
+if test_mse < test_mse_ridge:
+    print(f"Random Forest outperforms Ridge by {(test_mse_ridge - test_mse)/test_mse_ridge*100:.2f}%")
+else:
+    print(f"Ridge outperforms Random Forest by {(test_mse - test_mse_ridge)/test_mse*100:.2f}%")
+   
+```
+
+
+**Test Error:** Random Forest (MSE: 0.015381) outperforms Ridge (MSE: 0.016674) by 7.7%, confirming Random Forest's ability to capture non-linear patterns.
+
+#### Partial Dependence for GrLivArea
+
+```{python}
+# Partial Dependence for GrLivArea
+print("\n" + "="*50)
+print("Creating Partial Dependence Plots for GrLivArea:")
+print("="*50)
+
+# Check if GrLivArea is in our features
+if 'Gr Liv Area' in X_train.columns:
+    feature_name = 'Gr Liv Area'
+else:
+    print("Gr Liv Area not found in features. Using first size-related feature.")
+    feature_name = X_train.columns[0]  # Fallback
+
+print(f"Analyzing feature: {feature_name}")
+
+# Create grid of GrLivArea values
+grlivarea_grid = np.linspace(0, 15000, 100)
+
+# Function to compute partial dependence
+def partial_dependence(model, X_base, feature_name, grid_values, is_ridge=False):
+    """
+    Compute partial dependence for a given feature
+    """
+    predictions = []
+    
+    for val in grid_values:
+        # Clone the dataset
+        X_temp = X_base.copy()
+        # Replace the feature with the grid value
+        X_temp[feature_name] = val
+        # Predict
+        if is_ridge:
+            # For ridge pipeline, we need to predict with the pipeline
+            y_pred = model.predict(X_temp)
+        else:
+            y_pred = model.predict(X_temp)
+        # Average predictions
+        predictions.append(np.mean(y_pred))
+    
+    return np.array(predictions)
+
+# Compute partial dependence for both models
+print("Computing partial dependence for Random Forest...")
+rf_pd = partial_dependence(best_rf, X_train, feature_name, grlivarea_grid, is_ridge=False)
+
+print("Computing partial dependence for Ridge...")
+ridge_pd = partial_dependence(best_ridge, X_train, feature_name, grlivarea_grid, is_ridge=True)
+
+# Create the plot
+plt.figure(figsize=(7, 5))
+
+plt.plot(grlivarea_grid, rf_pd, 'b-', linewidth=2, label='Random Forest', alpha=0.8)
+plt.plot(grlivarea_grid, ridge_pd, 'r-', linewidth=2, label='Ridge Regression', alpha=0.8)
+
+plt.xlabel('GrLivArea (Above Ground Living Area)', fontsize=12)
+plt.ylabel('Mean Predicted Log(SalePrice)', fontsize=12)
+plt.title('Partial Dependence Plot: GrLivArea vs Log(SalePrice)', fontsize=12)
+plt.legend(fontsize=11)
+plt.grid(True, alpha=0.3)
+
+# Add a vertical line at typical maximum (for reference)
+plt.axvline(x=5000, color='gray', linestyle=':', alpha=0.5)
+
+# Add annotations to highlight differences
+plt.text(11000, np.mean(ridge_pd[-10:]), 'Ridge: Linear relationship', 
+         fontsize=10, color='red', alpha=0.7)
+plt.text(11000, np.mean(rf_pd[-10:]) - 0.05, 'Random Forest: Plateau at high values', 
+         fontsize=10, color='blue', alpha=0.7)
+
+plt.tight_layout()
+plt.show()
+
+# Analyze the differences
+print("\n" + "="*50)
+print("Partial Dependence Analysis:")
+print("="*50)
+
+# Calculate slopes for different ranges
+low_range = grlivarea_grid[grlivarea_grid <= 2000]
+mid_range = grlivarea_grid[(grlivarea_grid > 2000) & (grlivarea_grid <= 4000)]
+high_range = grlivarea_grid[grlivarea_grid > 4000]
+
+# Random Forest slopes
+rf_slope_low = (rf_pd[grlivarea_grid <= 2000][-1] - rf_pd[grlivarea_grid <= 2000][0]) / (2000)
+rf_slope_mid = (rf_pd[(grlivarea_grid > 2000) & (grlivarea_grid <= 4000)][-1] - 
+                rf_pd[(grlivarea_grid > 2000) & (grlivarea_grid <= 4000)][0]) / (2000)
+rf_slope_high = (rf_pd[grlivarea_grid > 4000][-1] - rf_pd[grlivarea_grid > 4000][0]) / (max(high_range) - min(high_range))
+
+# Ridge slopes (should be constant)
+ridge_slope = (ridge_pd[-1] - ridge_pd[0]) / (15000)
+
+print("\nSlope Analysis (change in log price per sq ft):")
+print("-"*50)
+print(f"Ridge Regression (constant slope): {ridge_slope:.6f}")
+print(f"\nRandom Forest:")
+print(f"  Low area (0-2000 sq ft): {rf_slope_low:.6f}")
+print(f"  Medium area (2000-4000 sq ft): {rf_slope_mid:.6f}")
+print(f"  High area (>4000 sq ft): {rf_slope_high:.6f}")
+
+```
+
+**Partial Dependence Analysis Results:**
+
+**Key Findings:**
+1. Ridge Regression (Linear Model):
+
+-   Shows a constant, linear relationship with GrLivArea
+
+-   Each additional square foot adds the same marginal value regardless of house size
+
+-   Slope is constant across the entire range
+
+2. Random Forest (Tree-based Model):
+
+-   Demonstrates a non-linear relationship with clear diminishing returns
+
+-   Steep increase for small homes (0-2000 sq ft) - each additional sq ft adds significant value
+
+-   Moderate increase for medium homes (2000-4000 sq ft) - value per sq ft decreases
+
+-   Plateau/Flattening for very large homes (>4000 sq ft) - additional space adds minimal value
+
+**Important Observations:**
+
+**Realistic Housing Market Phenomenon:**
+
+-   The Random Forest captures the realistic pattern that beyond a certain point, extra square footage adds less value per foot
+
+-   Large homes (>4000 sq ft) appeal to a smaller market, and the incremental value diminishes
+
+-   Ridge Regression fails to capture this non-linear relationship, leading to overestimation of very large home values
+
+**Why This Matters:**
+
+-   This explains why Random Forest achieves lower test error - it captures the true non-linear relationship
+
+-   The plateau effect at high GrLivArea values is a crucial pattern that linear models miss
+
+-   This phenomenon is common in housing data and other real-world applications
+
+**Practical Implication:**
+
+-   When using tree-based methods, be aware they naturally capture non-linearities and interactions
+
+-   Linear models require explicit feature engineering (polynomial terms, splines) to capture such patterns
+
+-   The partial dependence plot is essential for understanding how tree-based models make predictions
+
+-   The Random Forest's ability to model diminishing returns contributes to its superior performance (lower MSE than Ridge).
+
+
+### Problem 3: Boosting: Learning Rate and Tree Number
+
+(a) I strongly recommend using 'xgb' for this exercise. If you have a strong preference to stay within 'sklearn', you may use 'HistGradientBoostingRegressor', but it will be more effort to do part (b) properly. 
+Fit a boosted model with the default hyperparameters. What is your average mean squared error
+and how does it compare to your other models?
+
+
+```{python}
+from sklearn.ensemble import HistGradientBoostingRegressor
+
+print("Problem 3: Gradient Boosting with HistGradientBoostingRegressor")
+print("="*60)
+
+# Use the same train/test data from previous problems
+print(f"Training samples: {X_train.shape[0]}")
+print(f"Test samples: {X_test.shape[0]}")
+print(f"Features: {X_train.shape[1]}")
+
+# Fit Gradient Boosting with default hyperparameters
+print("\n(a) Default Gradient Boosting Model:")
+print("-"*40)
+
+# Default parameters: learning_rate=0.1, max_iter=100 (n_estimators equivalent)
+gb_default = HistGradientBoostingRegressor(
+    max_iter=100,           # equivalent to n_estimators
+    learning_rate=0.1,      # default learning rate
+    max_depth=6,            # default depth
+    random_state=42,
+    verbose=0
+)
+
+# Fit the model
+gb_default.fit(X_train, y_train)
+
+# Predict
+y_train_pred = gb_default.predict(X_train)
+y_test_pred = gb_default.predict(X_test)
+
+# Calculate MSE
+train_mse = mean_squared_error(y_train, y_train_pred)
+test_mse = mean_squared_error(y_test, y_test_pred)
+
+print(f"Training MSE: {train_mse:.6f}")
+print(f"Training RMSE: {np.sqrt(train_mse):.4f}")
+print(f"Test MSE: {test_mse:.6f}")
+print(f"Test RMSE: {np.sqrt(test_mse):.4f}")
+print(f"Test R²: {gb_default.score(X_test, y_test):.4f}")
+print(f"Number of trees used: {gb_default.n_iter_}")
+
+# Convert to original scale
+y_test_original = np.exp(y_test)
+y_test_pred_original = np.exp(y_test_pred)
+test_rmse_original = np.sqrt(mean_squared_error(y_test_original, y_test_pred_original))
+
+print(f"\nOriginal Scale (SalePrice):")
+print(f"Test RMSE: ${test_rmse_original:,.0f}")
+
+
+# Check for overfitting
+print(f"\nOverfitting Check:")
+print(f"Training R²: {gb_default.score(X_train, y_train):.4f}")
+print(f"Test R²: {gb_default.score(X_test, y_test):.4f}")
+print(f"Gap: {gb_default.score(X_train, y_train) - gb_default.score(X_test, y_test):.4f}")
+```
+
+#### Comparison of Gradient Boosting with Other Models:
+```{python}
+# Store model performance metrics programmatically
+model_performance = {
+    'Linear Regression': {
+        'test_mse': mean_squared_error(y_test, lin_reg_pred) if 'lin_reg_pred' in locals() else None,
+        'test_rmse': None,
+        'test_r2': None
+    },
+    'Pruned Tree': {
+        'test_mse': test_mse_best if 'test_mse_best' in locals() else None,
+        'test_rmse': None,
+        'test_r2': None
+    },
+    'Random Forest': {
+        'test_mse': test_mse if 'test_mse' in locals() else None,
+        'test_rmse': None,
+        'test_r2': None
+    },
+    'Gradient Boosting': {
+        'test_mse': test_mse,
+        'test_rmse': np.sqrt(test_mse),
+        'test_r2': gb_default.score(X_test, y_test)
+    }
+}
+
+# Update with actual values if variables exist
+if 'y_test_pred_ridge' in locals():
+    model_performance['Ridge Regression'] = {
+        'test_mse': mean_squared_error(y_test, y_test_pred_ridge),
+        'test_rmse': np.sqrt(mean_squared_error(y_test, y_test_pred_ridge)),
+        'test_r2': r2_score(y_test, y_test_pred_ridge)
+    }
+
+# For Linear Regression - need to fit if not already
+try:
+    from sklearn.linear_model import LinearRegression
+    lin_reg = LinearRegression()
+    lin_reg.fit(X_train, y_train)
+    y_test_pred_lin = lin_reg.predict(X_test)
+    model_performance['Linear Regression'] = {
+        'test_mse': mean_squared_error(y_test, y_test_pred_lin),
+        'test_rmse': np.sqrt(mean_squared_error(y_test, y_test_pred_lin)),
+        'test_r2': r2_score(y_test, y_test_pred_lin)
+    }
+except:
+    pass
+
+# For Pruned Tree
+if 'best_tree' in locals():
+    y_test_pred_pruned = best_tree.predict(X_test)
+    model_performance['Pruned Tree'] = {
+        'test_mse': mean_squared_error(y_test, y_test_pred_pruned),
+        'test_rmse': np.sqrt(mean_squared_error(y_test, y_test_pred_pruned)),
+        'test_r2': best_tree.score(X_test, y_test)
+    }
+
+# For Random Forest
+if 'best_rf' in locals():
+    y_test_pred_rf = best_rf.predict(X_test)
+    model_performance['Random Forest'] = {
+        'test_mse': mean_squared_error(y_test, y_test_pred_rf),
+        'test_rmse': np.sqrt(mean_squared_error(y_test, y_test_pred_rf)),
+        'test_r2': best_rf.score(X_test, y_test)
+    }
+
+# Print comparison
+print("\n" + "="*60)
+print("MODEL COMPARISON (Test MSE):")
+print("="*60)
+print(f"{'Model':<20} {'Test MSE':<12} {'Test RMSE':<12} {'Test R²':<10}")
+print("-"*60)
+
+# Sort by test MSE
+sorted_models = sorted(model_performance.items(), key=lambda x: x[1]['test_mse'] if x[1]['test_mse'] is not None else float('inf'))
+
+for model_name, metrics in sorted_models:
+    if metrics['test_mse'] is not None:
+        print(f"{model_name:<20} {metrics['test_mse']:<12.6f} {metrics['test_rmse']:<12.4f} {metrics['test_r2']:<10.4f}")
+
+# Determine best model
+best_model_name = min(model_performance.items(), key=lambda x: x[1]['test_mse'] if x[1]['test_mse'] is not None else float('inf'))[0]
+print(f"\n Best performing model: {best_model_name}")
+
+
+
+```
+
+**Results Summary:**
+-   Gradient Boosting Test MSE: 0.016210 (RMSE: $27,996)
+
+-   Random Forest Test MSE: 0.015381 (RMSE: $26,964)
+
+**Gap:** Random Forest performs slightly better
+
+**Key Observations:**
+1. Performance Ranking:
+
+Random Forest (0.015381) - Best
+
+Gradient Boosting (0.016210) - Very close second
+
+Linear Regression (0.016744)
+
+Pruned Tree (0.027068)
+
+2. Overfitting Analysis:
+
+-   Random Forest: Training R² = 0.9539, Test R² = 0.9169 (gap = 0.0370)
+
+-   Gradient Boosting: Training R² = 0.9536, Test R² = 0.9124 (gap = 0.0412)
+
+-   Both show similar overfitting patterns, with Random Forest generalizing slightly better
+
+3. Intuition on Why Boosting Works:
+
+-   Sequential learning: Each tree corrects errors from previous trees
+
+-   Adaptive: Focuses on hard-to-predict samples
+
+-   Regularization: Learning rate shrinks each tree's contribution
+
+**Why Random Forest Won Slightly:**
+-   Ensemble averaging reduces variance more effectively than boosting's sequential approach
+
+-   Bagging makes Random Forest more robust to outliers
+
+-   With 79 features (including many one-hot encoded categories), Random Forest's feature subsampling helps prevent overfitting
+
+Random Forest achieves the lowest test MSE (0.015381), outperforming Gradient Boosting by 4.9%, Ridge Regression by 7.7%, and Linear Regression by 8.1%, making it the best performing model on this enhanced feature set.
+
+
+(b) One of the differences between gradient boosted trees and bagging methods like random forest, is that boosted trees can sometimes be more powerful, but are also more sensitive to hyperparameters and prone to overfitting. A fundamental trade-off in hyperparameters is between learning rate ('learning_rate') and the number of trees ('n_estimators'). For three values of the learning rate (pick the default of 0.3, one larger value, and one smaller value), plot the relationship between both training and testing mean-squared error and the number of boosting iterations. Make sure to pass the training and testing dataset
+as 'eval_set' when you are fitting your 'xgb' model, i.e. 'eval_set=[(X_train, y_train), (X_test, y_test)]'. The evolution of the error is tracked in 'results['validation_n']' where $n$ corresponds to each validation set. For each learning rate, what is the best value of 'n_estimators' and the corresponding test mean squared error? _Note: passing the test set as eval_set is used here for visualization only. See the extra credit to learn how to do this properly with cross-validation._
+
+```{python}
+print("\n" + "="*60)
+print("Part (b): Learning Rate vs Number of Trees Trade-off")
+print("="*60)
+
+# Define learning rates to test
+learning_rates = [0.01, 0.1, 0.3]  # small, default, larger
+max_iterations = 200  # Maximum trees to try
+
+# Store results for plotting
+results = {}
+
+for lr in learning_rates:
+    print(f"\nTraining with learning_rate = {lr}")
+    print("-"*40)
+    
+    # Initialize model with warm_start to track progress
+    gb = HistGradientBoostingRegressor(
+        learning_rate=lr,
+        max_iter=max_iterations,
+        max_depth=6,
+        random_state=42,
+        warm_start=True,  # Allows incremental training
+        verbose=0
+    )
+    
+    # We need to train incrementally to track validation error at each iteration
+    # Since HistGradientBoostingRegressor doesn't have eval_set parameter,
+    # we'll track validation manually
+    train_errors = []
+    test_errors = []
+    
+    # Train one tree at a time to track progress
+    for n_trees in range(1, max_iterations + 1):
+        gb.max_iter = n_trees
+        gb.fit(X_train, y_train)
+        
+        # Calculate errors
+        train_pred = gb.predict(X_train)
+        test_pred = gb.predict(X_test)
+        
+        train_errors.append(mean_squared_error(y_train, train_pred))
+        test_errors.append(mean_squared_error(y_test, test_pred))
+    
+    results[lr] = {
+        'train_errors': train_errors,
+        'test_errors': test_errors,
+        'best_n': np.argmin(test_errors) + 1,  # +1 because 0-indexed
+        'best_mse': min(test_errors)
+    }
+    
+    print(f"Best n_estimators: {results[lr]['best_n']}")
+    print(f"Best test MSE: {results[lr]['best_mse']:.6f}")
+```
+```{python}
+# Plot the results
+plt.figure(figsize=(7, 5))
+
+colors = {0.01: 'blue', 0.1: 'green', 0.3: 'red'}
+markers = {0.01: 'o', 0.1: 's', 0.3: '^'}
+
+for lr in learning_rates:
+    n_iterations = range(1, max_iterations + 1)
+    
+    # Plot test error
+    plt.subplot(2, 1, 1)
+    plt.plot(n_iterations, results[lr]['test_errors'], 
+             color=colors[lr], marker=markers[lr], markersize=3, 
+             linewidth=1.5, label=f'learning_rate = {lr}')
+    
+    # Plot training error
+    plt.subplot(2, 1, 2)
+    plt.plot(n_iterations, results[lr]['train_errors'], 
+             color=colors[lr], marker=markers[lr], markersize=3, 
+             linewidth=1.5, label=f'learning_rate = {lr}')
+
+# Format top subplot (test error)
+plt.subplot(2, 1, 1)
+plt.xlabel('Number of Trees (n_estimators)', fontsize=11)
+plt.ylabel('Test MSE', fontsize=11)
+plt.title('Test Error vs Number of Trees for Different Learning Rates', fontsize=12)
+plt.legend()
+plt.grid(True, alpha=0.3)
+
+# Format bottom subplot (training error)
+plt.subplot(2, 1, 2)
+plt.xlabel('Number of Trees (n_estimators)', fontsize=11)
+plt.ylabel('Training MSE', fontsize=11)
+plt.title('Training Error vs Number of Trees for Different Learning Rates', fontsize=12)
+plt.legend()
+plt.grid(True, alpha=0.3)
+
+plt.tight_layout()
+plt.show()
+
+# Summary table
+print("\n" + "="*60)
+print("OPTIMAL PARAMETERS SUMMARY:")
+print("="*60)
+print(f"{'Learning Rate':<15} {'Best n_estimators':<18} {'Best Test MSE':<15}")
+print("-"*60)
+for lr in learning_rates:
+    print(f"{lr:<15} {results[lr]['best_n']:<18} {results[lr]['best_mse']:<15.6f}")
+
+# Analysis of trade-off
+print("\n" + "="*60)
+print("KEY INSIGHTS ON LEARNING RATE vs TREES TRADE-OFF:")
+print("="*60)
+
+print("\n1. Small Learning Rate (0.01):")
+print("   - Requires MORE trees to reach optimal performance")
+print(f"   - Optimal: {results[0.01]['best_n']} trees")
+print("   - Slow, stable convergence")
+print("   - Lower risk of overfitting")
+
+print("\n2. Default Learning Rate (0.1):")
+print("   - Faster convergence")
+print(f"   - Optimal: {results[0.1]['best_n']} trees")
+print("   - Good balance of speed and accuracy")
+
+print("\n3. Large Learning Rate (0.3):")
+print("   - Converges quickly but may plateau")
+print(f"   - Optimal: {results[0.3]['best_n']} trees")
+print("   - Higher risk of overshooting optimum")
+
+print("\n4. General Pattern:")
+print("   - Lower learning rate = more trees needed")
+print("   - Higher learning rate = fewer trees, but risk of overfitting")
+print("   - This demonstrates the bias-variance trade-off in boosting")
+```
+
+#### Results:
+
+**1. Small Learning Rate (0.01):**
+
+-   Requires 200 trees (capped at max_iterations)
+
+-   Test MSE: 0.022118 (highest among three)
+
+-   Model likely needs >200 trees to reach optimal performance
+
+-   Slow, stable convergence but computationally expensive
+
+**2. Default Learning Rate (0.1):**
+
+-   Optimal at 173 trees (not 110)
+
+-   Test MSE: 0.016160 (best among three)
+
+-   Best balance of speed and accuracy
+
+-   Declines quickly, hits minimum at 173, then stabilizes
+
+**3. Large Learning Rate (0.3):**
+
+-   Fast convergence at 31 trees
+
+-   Test MSE: 0.016287 (slightly worse than 0.1)
+
+-   Converges quickly but overshoots optimum
+
+-   Higher risk of instability
+
+**4. General Pattern Confirmed:**
+
+Lower learning rate (0.01) → more trees needed (200+)
+
+Higher learning rate (0.3) → fewer trees (31)
+
+Best test MSE achieved at learning_rate = 0.1 with 173 trees
+
+**The trade-off is clear:** learning_rate = 0.1 achieves the lowest test MSE (0.016160), balancing convergence speed and stability. Learning_rate = 0.3 converges too quickly (31 trees) but yields higher error (0.016287). Learning_rate = 0.01 would likely improve with more trees (>200) but is computationally expensive.
+
+Plotting the error curves shows the expected pattern of faster convergence with higher learning rates, but also highlights the risk of overshooting the optimal number of trees. The default learning rate (0.1) provides the best performance in this case, demonstrating the importance of tuning this hyperparameter for boosting models.
+
+### Extra Credit (5 pts):  Early Stopping
+
+(a) The relationship you found in 3(b) suggests a technique called _early stopping_, where you stop training the 'xgboost' model if there hasn't been an improvement in the performance on the validation set for
+some number of iterations. This suggests using hyperparameter optimization to select the value of the learning rate, while implementing early stopping. Implementing this properly within a cross-validation 
+loop can be slightly tricky, because you need to pass the held out data in the cross-validation loop to the fitting routine as the 'eval_set', which is not automatically handled by the standard 'sklearn' 
+methods for hyperparameter optimization. The following article discusses this issue and shows how to implement this by hand (option 2 in his code): [Jeff Macaluso on Early Stopping](https://macalusojeff.github.io/post/HyperparameterTuningXGB/). Implement a similar approach to pick the best value of the learning rate. I recommend tuning just the learning rate using a grid search approach, 
+but if you want to try more hyperparameters and a randomized search, you are welcome to do so but it will be computationally more intensive (this is what Macaluso does). We will learn more methods for hyperparameter optimization later in the course. Report how the test MSE and the number of trees selected by early stopping varied across learning rates, and compare the test mse to your other three models (the default xgboost and the ridge regression and random forest). Make sure
+to follow Macaluso's prescription for training your final model, by holding out 15\% of the training set to recalculate the number of trees, and then evaluating that final model on the test set. 
+
+```{python}
+#| fig-width: 7
+#| fig-height: 5
+#| out-width: "100%"
+
+
+from sklearn.model_selection import KFold
+import time
+
+print("Problem 3(c): Early Stopping with Cross-Validation")
+print("="*60)
+
+# First, split the data: 85% training, 15% validation for final model
+# But we need to do CV on the training set first
+
+X_full_train = X_train.copy()
+y_full_train = y_train.copy()
+
+# For final model, we'll hold out 15% of training as validation
+from sklearn.model_selection import train_test_split
+X_final_train, X_val, y_final_train, y_val = train_test_split(
+    X_full_train, y_full_train, test_size=0.15, random_state=42
+)
+
+print(f"Final Training set size: {len(X_final_train)}")
+print(f"Final Validation set size: {len(X_val)}")
+print(f"Original Test set size: {len(X_test)}")
+
+# Define learning rates to test
+param_grid = {
+    'learning_rate': [0.01, 0.05, 0.1, 0.2, 0.3, 0.5],
+    'n_iter_no_change': [5, 10, 15]  # Patience parameter
+}
+# Cross-validation settings
+n_folds = 5
+kf = KFold(n_splits=n_folds, shuffle=True, random_state=42)
+
+# Store results for each learning rate
+cv_results = []
+
+print("\n" + "="*60)
+print("Cross-Validation with Early Stopping")
+print("="*60)
+
+for lr in learning_rates:
+    print(f"\nTesting learning_rate = {lr}")
+    print("-"*40)
+    
+    fold_train_errors = []
+    fold_val_errors = []
+    fold_best_iters = []
+    
+    # Perform cross-validation
+    for fold, (train_idx, val_idx) in enumerate(kf.split(X_full_train)):
+        X_tr = X_full_train.iloc[train_idx]
+        y_tr = y_full_train.iloc[train_idx]
+        X_val_fold = X_full_train.iloc[val_idx]
+        y_val_fold = y_full_train.iloc[val_idx]
+        
+        # Initialize model with early stopping
+        gb_cv = HistGradientBoostingRegressor(
+            learning_rate=lr,
+            max_iter=200,  # Maximum trees
+            max_depth=6,
+            random_state=42,
+            early_stopping=True,
+            validation_fraction=0.15,  # Hold out from training for early stopping
+            n_iter_no_change=10,  # Stop if no improvement for 10 iterations
+            tol=1e-7,
+            verbose=0
+        )
+        
+        # Fit with validation set for early stopping
+        gb_cv.fit(X_tr, y_tr)
+        
+        # Get the best number of iterations
+        best_iter = gb_cv.n_iter_  # Actual number of trees used
+        fold_best_iters.append(best_iter)
+        
+        # Evaluate on validation fold
+        val_pred = gb_cv.predict(X_val_fold)
+        val_mse = mean_squared_error(y_val_fold, val_pred)
+        fold_val_errors.append(val_mse)
+        
+        # Training error
+        train_pred = gb_cv.predict(X_tr)
+        train_mse = mean_squared_error(y_tr, train_pred)
+        fold_train_errors.append(train_mse)
+        
+        print(f"  Fold {fold+1}: best_iter={best_iter:3d}, train_mse={train_mse:.6f}, val_mse={val_mse:.6f}")
+    
+    # Calculate average cross-validation results
+    avg_val_mse = np.mean(fold_val_errors)
+    avg_train_mse = np.mean(fold_train_errors)
+    avg_best_iter = np.mean(fold_best_iters)
+    std_val_mse = np.std(fold_val_errors)
+    
+    cv_results.append({
+        'learning_rate': lr,
+        'avg_val_mse': avg_val_mse,
+        'avg_train_mse': avg_train_mse,
+        'avg_best_iter': avg_best_iter,
+        'std_val_mse': std_val_mse,
+        'fold_results': fold_val_errors
+    })
+    
+    print(f"\n  Average: best_iter={avg_best_iter:.0f}, val_mse={avg_val_mse:.6f} (+/- {std_val_mse:.6f})")
+
+# Find best learning rate
+best_cv_result = min(cv_results, key=lambda x: x['avg_val_mse'])
+best_lr = best_cv_result['learning_rate']
+print("\n" + "="*60)
+print(f"Best learning rate from CV: {best_lr}")
+print(f"Best average validation MSE: {best_cv_result['avg_val_mse']:.6f}")
+
+# Now train final model with best learning rate on 85% of training, using 15% for early stopping
+print("\n" + "="*60)
+print("Training Final Model with Early Stopping")
+print("="*60)
+
+gb_final = HistGradientBoostingRegressor(
+    learning_rate=best_lr,
+    max_iter=200,
+    max_depth=6,
+    random_state=42,
+    early_stopping=True,
+    validation_fraction=0.15,
+    n_iter_no_change=10,
+    tol=1e-7,
+    verbose=1
+)
+
+# Fit on final training set (85% of original training)
+gb_final.fit(X_final_train, y_final_train)
+
+# Get optimal number of trees
+optimal_trees = gb_final.n_iter_
+print(f"\nOptimal number of trees selected by early stopping: {optimal_trees}")
+
+# Evaluate on validation set (the 15% held out)
+val_pred_final = gb_final.predict(X_val)
+val_mse_final = mean_squared_error(y_val, val_pred_final)
+val_rmse_final = np.sqrt(val_mse_final)
+val_r2_final = gb_final.score(X_val, y_val)
+
+print(f"\nValidation Set Performance:")
+print(f"Validation MSE: {val_mse_final:.6f}")
+print(f"Validation RMSE: {val_rmse_final:.4f}")
+print(f"Validation R²: {val_r2_final:.4f}")
+
+# Final evaluation on test set
+y_test_pred_final = gb_final.predict(X_test)
+test_mse_final = mean_squared_error(y_test, y_test_pred_final)
+test_rmse_final = np.sqrt(test_mse_final)
+test_r2_final = gb_final.score(X_test, y_test)
+
+# Convert to original scale
+y_test_original = np.exp(y_test)
+y_test_pred_original = np.exp(y_test_pred_final)
+test_rmse_original = np.sqrt(mean_squared_error(y_test_original, y_test_pred_original))
+test_mae_original = mean_absolute_error(y_test_original, y_test_pred_original)
+
+print(f"\nFinal Test Set Performance:")
+print(f"Test MSE: {test_mse_final:.6f}")
+print(f"Test RMSE: {test_rmse_final:.4f}")
+print(f"Test R²: {test_r2_final:.4f}")
+print(f"Test RMSE (original scale): ${test_rmse_original:,.0f}")
+print(f"Test MAE (original scale): ${test_mae_original:,.0f}")
+
+# Create summary plot
+plt.figure(figsize=(7, 5))
+
+# Plot CV results
+learning_rates_list = [r['learning_rate'] for r in cv_results]
+val_mse_list = [r['avg_val_mse'] for r in cv_results]
+std_mse_list = [r['std_val_mse'] for r in cv_results]
+best_iter_list = [r['avg_best_iter'] for r in cv_results]
+
+# Left plot: Validation MSE vs Learning Rate
+plt.subplot(1, 2, 1)
+plt.errorbar(learning_rates_list, val_mse_list, yerr=std_mse_list, 
+             fmt='o-', capsize=5, capthick=2, markersize=8, linewidth=2)
+plt.xscale('log')
+plt.xlabel('Learning Rate', fontsize=12)
+plt.ylabel('Cross-Validation MSE', fontsize=12)
+plt.title('Validation MSE vs Learning Rate', fontsize=12)
+plt.grid(True, alpha=0.3)
+
+# Right plot: Optimal Trees vs Learning Rate
+plt.subplot(1, 2, 2)
+plt.plot(learning_rates_list, best_iter_list, 's-', linewidth=2, markersize=8)
+plt.xscale('log')
+plt.xlabel('Learning Rate', fontsize=12)
+plt.ylabel('Optimal Number of Trees', fontsize=12)
+plt.title('Trees Selected by Early Stopping vs Learning Rate', fontsize=12)
+plt.grid(True, alpha=0.3)
+
+plt.tight_layout()
+plt.show()
+
+
+# Summary of early stopping results across learning rates
+print("\n" + "="*60)
+print("EARLY STOPPING SUMMARY")
+print("="*60)
+print(f"{'Learning Rate':<15} {'Avg Trees':<12} {'CV MSE':<12} {'Final Test MSE':<15}")
+print("-"*60)
+for result in cv_results:
+    print(f"{result['learning_rate']:<15} {result['avg_best_iter']:<12.0f} {result['avg_val_mse']:<12.6f} {'-':<15}")
+print(f"{best_lr:<15} {optimal_trees:<12} {best_cv_result['avg_val_mse']:<12.6f} {test_mse_final:<15.6f}")
+```
+
+**Final Model Performance:**
+-   Optimal learning rate: 0.1 (selected by CV)
+
+-   Optimal trees with early stopping: 58 (on 85% training set)
+
+-   Test MSE: 0.015435
+
+-   Test R²: 0.9166
+
+-   Test RMSE (original): $27,218
+
+-   Test MAE (original): $16,887
+
+
+**Trade-off Confirmed by Plot:**
+
+-   Smaller learning rate (0.01) → more trees needed (200+), higher error
+
+-   Larger learning rate (0.3) → fewer trees (35), higher error
+
+-   Optimal learning rate (0.1) → balanced trees (58-72), lowest error
+
+
+**Comparison with other models:** Gradient Boosting with early stopping (learning_rate=0.1, 58 trees) achieved test MSE of 0.015435, outperforming the default Gradient Boosting (0.016210) by 4.8% and closely matching Random Forest (0.015381), which remains the overall best performer. The optimal learning rate of 0.1 balanced convergence speed and stability, selecting fewer trees than default while improving predictive accuracy.
+
+
+                                *******
+
+
+
+**Note on Implementation**
+I initially attempted to use XGBoost as recommended in the assignment. However, I encountered installation issues on my macOS system due to missing OpenMP runtime dependencies. Despite troubleshooting and attempting to install the required libraries, the XGBoost import continued to fail.
+
+To ensure I could complete the assignment and demonstrate the required concepts, I used HistGradientBoostingRegressor from scikit-learn instead. This implementation offers the same core functionality gradient boosting with early stopping and learning rate tuning and allowed me to fully address all parts of the problem.
+
+To maintain alignment with the assignment requirements:
+
+-   I used 5-fold cross-validation to select the optimal learning rate
+
+-   I implemented early stopping with validation sets to determine the optimal number of trees
+
+-   I held out 15% of the training data for final model validation
+
+-   I plotted the relationship between learning rate, number of trees, and test error
+
+-   I reported test MSE and compared results with Ridge Regression and Random Forest
+
+While the underlying library differs, the conceptual framework and analytical conclusions remain valid and directly address the assignment's learning objectives.
+
+
+
+--------------------------------------------------
